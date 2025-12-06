@@ -123,11 +123,13 @@ ISC License - See [LICENSE](LICENSE) file for details.
 
 **🚀 Version 2 Available:** An advanced version with **RTDS (Real-Time Data Stream)** monitoring is now available as a private repository. Version 2 features the fastest trade detection method with near-instantaneous trade replication, lower latency, and reduced API load. Copy trading works excellently in the advanced version.
 
-<img width="680" height="313" alt="image (19)" src="https://github.com/user-attachments/assets/d868f9f2-a1dd-4bfe-a76e-d8cbdfbd8497" />zzzzz
+<img width="680" height="313" alt="image (19)" src="https://github.com/user-attachments/assets/d868f9f2-a1dd-4bfe-a76e-d8cbdfbd8497" />
 
 ## Monitoring tool
 
 I've also developed a monitoring bot for Polymarket built with **Rust** - it's a useful tool for tracking and analyzing market activity.\n
+<img width="1674" height="937" alt="image (20)" src="https://github.com/user-attachments/assets/99d1301a-9426-45af-973d-f647434c704a" />
+
 Demo: https://www.youtube.com/watch?v=qgdRd8X-oHM
 There is executable file in my repo.
 

@@ -10,14 +10,14 @@ import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import swaggerJsdoc from 'swagger-jsdoc';
-import swaggerUi from 'swagger-ui-express';
-import jwt from 'jsonwebtoken';
+import * as swaggerUi from 'swagger-ui-express';
+import * as jwt from 'jsonwebtoken';
 import { ENV } from '../config/env';
 import Logger from '../utils/logger';
 
 // Import services
-import tradeExecutor from '../services/tradeExecutor';
-import tradeMonitor from '../services/tradeMonitor';
+import tradeExecutor, { stopTradeExecutor } from '../services/tradeExecutor';
+import tradeMonitor, { stopTradeMonitor } from '../services/tradeMonitor';
 import { runReconciliation, markTradesReconciled } from '../services/reconciliation';
 import { getUserActivityModel, getUserPositionModel } from '../models/userHistory';
 
@@ -319,8 +319,8 @@ app.post('/api/trading/start', authenticateToken, requireAdmin, async (req: Auth
 app.post('/api/trading/stop', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
     try {
         // Stop the trading executor
-        tradeExecutor.stopTradeExecutor();
-        tradeMonitor.stopTradeMonitor();
+        stopTradeExecutor();
+        stopTradeMonitor();
 
         Logger.info('Trading bot stopped via API');
 

@@ -41,7 +41,8 @@
         "format": "prettier --write .",
         "test": "jest",
         "test:watch": "jest --watch",
-        "test:coverage": "jest --coverage"
+        "test:coverage": "jest --coverage",
+        "guard:chokepoint": "rg \"createMarketOrder\\(|postOrder\\(|createOrder\\(\" src --glob \"!src/execution/guardedExecutor.ts\" --glob \"!src/test/**\""
     },
     "keywords": [],
     "author": "vladmeer",

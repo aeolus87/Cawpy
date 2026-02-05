@@ -1,16 +1,15 @@
 import { ethers } from 'ethers';
-import { AssetType, ClobClient, OrderType, Side } from '@polymarket/clob-client';
+import { AssetType, ClobClient } from '@polymarket/clob-client';
 import { SignatureType } from '@polymarket/order-utils';
 import { ENV } from '../config/env';
 import fetchData from '../utils/fetchData';
+import { executeOrderGuarded } from '../execution/guardedExecutor';
 
 const PROXY_WALLET = ENV.PROXY_WALLET;
 const PRIVATE_KEY = ENV.PRIVATE_KEY;
 const CLOB_HTTP_URL = ENV.CLOB_HTTP_URL;
 const RPC_URL = ENV.RPC_URL;
 const POLYGON_CHAIN_ID = 137;
-const RETRY_LIMIT = ENV.RETRY_LIMIT;
-
 const SELL_PERCENTAGE = 0.8; // 80%
 const MIN_POSITION_VALUE = 17; // Продаем только позиции > $17
 
@@ -104,8 +103,6 @@ const updatePolymarketCache = async (clobClient: ClobClient, tokenId: string) =>
 };
 
 const sellPosition = async (clobClient: ClobClient, position: Position, sellSize: number) => {
-    let remaining = sellSize;
-    let retry = 0;
 
     console.log(
         `\n🔄 Starting to sell ${sellSize.toFixed(2)} tokens (${(SELL_PERCENTAGE * 100).toFixed(0)}% of position)`
@@ -116,125 +113,50 @@ const sellPosition = async (clobClient: ClobClient, position: Position, sellSize
     // Update Polymarket cache before selling
     await updatePolymarketCache(clobClient, position.asset);
 
-    while (remaining > 0 && retry < RETRY_LIMIT) {
-        try {
-            // Получаем текущую книгу заказов
-            const orderBook = await clobClient.getOrderBook(position.asset);
+    const orderBook = await clobClient.getOrderBook(position.asset);
 
-            if (!orderBook.bids || orderBook.bids.length === 0) {
-                console.log('❌ No bids available in order book');
-                break;
-            }
-
-            // Находим лучший бид
-            const maxPriceBid = orderBook.bids.reduce((max, bid) => {
-                return parseFloat(bid.price) > parseFloat(max.price) ? bid : max;
-            }, orderBook.bids[0]);
-
-            console.log(`📊 Best bid: ${maxPriceBid.size} tokens @ $${maxPriceBid.price}`);
-
-            // Определяем размер ордера
-            let orderAmount: number;
-            if (remaining <= parseFloat(maxPriceBid.size)) {
-                orderAmount = remaining;
-            } else {
-                orderAmount = parseFloat(maxPriceBid.size);
-            }
-
-            // Создаем ордер на продажу
-            const orderArgs = {
-                side: Side.SELL,
-                tokenID: position.asset,
-                amount: orderAmount,
-                price: parseFloat(maxPriceBid.price),
-            };
-
-            console.log(`📤 Selling ${orderAmount.toFixed(2)} tokens at $${orderArgs.price}...`);
-
-            const signedOrder = await clobClient.createMarketOrder(orderArgs);
-            const resp = await clobClient.postOrder(signedOrder, OrderType.FOK);
-
-            if (resp.success === true) {
-                retry = 0;
-                const soldValue = (orderAmount * orderArgs.price).toFixed(2);
-                console.log(
-                    `✅ SUCCESS: Sold ${orderAmount.toFixed(2)} tokens at $${orderArgs.price} (Total: $${soldValue})`
-                );
-                remaining -= orderAmount;
-
-                if (remaining > 0) {
-                    console.log(`⏳ Remaining to sell: ${remaining.toFixed(2)} tokens\n`);
-                }
-            } else {
-                retry += 1;
-                const errorMsg = extractOrderError(resp);
-                console.log(
-                    `⚠️  Order failed (attempt ${retry}/${RETRY_LIMIT})${errorMsg ? `: ${errorMsg}` : ''}`
-                );
-
-                if (retry < RETRY_LIMIT) {
-                    console.log('🔄 Retrying...\n');
-                    await new Promise((resolve) => setTimeout(resolve, 1000));
-                }
-            }
-        } catch (error) {
-            retry += 1;
-            console.error(`❌ Error during sell attempt ${retry}/${RETRY_LIMIT}:`, error);
-
-            if (retry < RETRY_LIMIT) {
-                console.log('🔄 Retrying...\n');
-                await new Promise((resolve) => setTimeout(resolve, 1000));
-            }
-        }
+    if (!orderBook.bids || orderBook.bids.length === 0) {
+        console.log('❌ No bids available in order book');
+        return false;
     }
 
-    if (remaining > 0) {
-        console.log(`\n⚠️  Could not sell all tokens. Remaining: ${remaining.toFixed(2)} tokens`);
-        return false;
-    } else {
-        console.log(`\n🎉 Successfully sold ${sellSize.toFixed(2)} tokens!`);
+    const maxPriceBid = orderBook.bids.reduce((max, bid) => {
+        return parseFloat(bid.price) > parseFloat(max.price) ? bid : max;
+    }, orderBook.bids[0]);
+
+    const referencePrice = parseFloat(maxPriceBid.price);
+    console.log(`📊 Best bid: ${maxPriceBid.size} tokens @ $${referencePrice}`);
+    console.log(`📤 Selling ${sellSize.toFixed(2)} tokens at ~$${referencePrice}...`);
+
+    const result = await executeOrderGuarded(
+        { clobClient },
+        {
+            side: 'SELL',
+            tokenId: position.asset,
+            amount: sellSize,
+            traderPrice: referencePrice,
+            tradeUsdcSize: sellSize * referencePrice,
+            myPositionSize: position.size,
+            marketSlug: position.title,
+            tradeTimestamp: Date.now(),
+        }
+    );
+
+    if (result.executed && result.filledTokens && result.filledTokens > 0) {
+        console.log(`\n🎉 Successfully sold ${result.filledTokens.toFixed(2)} tokens!`);
         return true;
     }
+
+    if (result.skipped) {
+        console.log(`\n⚠️  Order skipped: ${result.reason}`);
+    } else if (result.failed) {
+        console.log(`\n❌ Order failed: ${result.reason}`);
+    }
+
+    return false;
 };
 
-const extractOrderError = (response: unknown): string | undefined => {
-    if (!response) {
-        return undefined;
-    }
-
-    if (typeof response === 'string') {
-        return response;
-    }
-
-    if (typeof response === 'object') {
-        const data = response as Record<string, unknown>;
-
-        const directError = data.error;
-        if (typeof directError === 'string') {
-            return directError;
-        }
-
-        if (typeof directError === 'object' && directError !== null) {
-            const nested = directError as Record<string, unknown>;
-            if (typeof nested.error === 'string') {
-                return nested.error;
-            }
-            if (typeof nested.message === 'string') {
-                return nested.message;
-            }
-        }
-
-        if (typeof data.errorMsg === 'string') {
-            return data.errorMsg;
-        }
-
-        if (typeof data.message === 'string') {
-            return data.message;
-        }
-    }
-
-    return undefined;
-};
+// Executor handles retries and error parsing
 
 async function main() {
     console.log('🚀 Sell Large Positions Script');

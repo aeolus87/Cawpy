@@ -10,6 +10,7 @@
 The Polymarket Copy Trading Bot automatically replicates trades from successful Polymarket traders to your wallet. It monitors trader activity 24/7, calculates proportional position sizes based on your capital, and executes matching orders in real-time.
 
 ### How It Works
+
 <img width="995" height="691" alt="screenshot" src="https://github.com/user-attachments/assets/79715c7a-de2c-4033-81e6-b2288963ec9b" />
 
 1. **Select Traders** - Choose top performers from [Polymarket leaderboard](https://polymarket.com/leaderboard) or [Predictfolio](https://predictfolio.com)
@@ -67,15 +68,15 @@ The bot currently uses the **Polymarket Data API** to monitor trader activity an
 
 ### Essential Variables
 
-| Variable | Description | Example |
-|----------|-------------|---------|
-| `USER_ADDRESSES` | Traders to copy (comma-separated) | `'0xABC..., 0xDEF...'` |
-| `PROXY_WALLET` | Your Polygon wallet address | `'0x123...'` |
-| `PRIVATE_KEY` | Wallet private key (no 0x prefix) | `'abc123...'` |
-| `MONGO_URI` | MongoDB connection string | `'mongodb+srv://...'` |
-| `RPC_URL` | Polygon RPC endpoint | `'https://polygon...'` |
-| `TRADE_MULTIPLIER` | Position size multiplier (default: 1.0) | `2.0` |
-| `FETCH_INTERVAL` | Check interval in seconds (default: 1) | `1` |
+| Variable           | Description                             | Example                |
+| ------------------ | --------------------------------------- | ---------------------- |
+| `USER_ADDRESSES`   | Traders to copy (comma-separated)       | `'0xABC..., 0xDEF...'` |
+| `PROXY_WALLET`     | Your Polygon wallet address             | `'0x123...'`           |
+| `PRIVATE_KEY`      | Wallet private key (no 0x prefix)       | `'abc123...'`          |
+| `MONGO_URI`        | MongoDB connection string               | `'mongodb+srv://...'`  |
+| `RPC_URL`          | Polygon RPC endpoint                    | `'https://polygon...'` |
+| `TRADE_MULTIPLIER` | Position size multiplier (default: 1.0) | `2.0`                  |
+| `FETCH_INTERVAL`   | Check interval in seconds (default: 1)  | `1`                    |
 
 ### Finding Traders
 
@@ -104,6 +105,7 @@ docker-compose logs -f polymarket
 ## Documentation
 
 ### Getting Started
+
 - **[🚀 Getting Started Guide](./docs/GETTING_STARTED.md)** - Complete beginner's guide
 - **[⚡ Quick Start](./docs/QUICK_START.md)** - Fast setup for experienced users
 

@@ -36,14 +36,12 @@ Docker deployment offers several advantages:
 ## Prerequisites
 
 1. **Docker and Docker Compose installed**
-
     - Docker Engine 20.10+
     - Docker Compose 2.0+
     - [Install Docker](https://docs.docker.com/get-docker/)
     - [Install Docker Compose](https://docs.docker.com/compose/install/)
 
 2. **System Requirements**
-
     - 2GB RAM minimum
     - 10GB disk space (for MongoDB data)
     - Linux, macOS, or Windows with WSL2
@@ -202,7 +200,6 @@ The Docker setup uses [Gluetun](https://github.com/qdm12/gluetun) which supports
 **VPN Configuration Steps:**
 
 1. **Get WireGuard configuration from your VPN provider**
-
     - Most providers offer WireGuard configs in their dashboard
     - Download or generate a WireGuard config file
 

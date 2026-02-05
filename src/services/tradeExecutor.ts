@@ -6,6 +6,7 @@ import fetchData from '../utils/fetchData';
 import getMyBalance from '../utils/getMyBalance';
 import postOrder from '../utils/postOrder';
 import Logger from '../utils/logger';
+import { getWorkerId } from '../utils/leaseManager';
 
 const USER_ADDRESSES = ENV.USER_ADDRESSES;
 const RETRY_LIMIT = ENV.RETRY_LIMIT;
@@ -13,6 +14,7 @@ const PROXY_WALLET = ENV.PROXY_WALLET;
 const TRADE_AGGREGATION_ENABLED = ENV.TRADE_AGGREGATION_ENABLED;
 const TRADE_AGGREGATION_WINDOW_SECONDS = ENV.TRADE_AGGREGATION_WINDOW_SECONDS;
 const TRADE_AGGREGATION_MIN_TOTAL_USD = 1.0; // Polymarket minimum
+const LEASE_TIMEOUT_MS = 30000;
 
 // Create activity models for each user
 const userActivityModels = USER_ADDRESSES.map((address) => ({
@@ -41,24 +43,76 @@ interface AggregatedTrade {
 // Buffer for aggregating trades
 const tradeAggregationBuffer: Map<string, AggregatedTrade> = new Map();
 
+const claimNextTrade = async (
+    address: string,
+    model: ReturnType<typeof getUserActivityModel>
+): Promise<TradeWithUser | null> => {
+    // Claim trades that are either:
+    // 1. New trades (bot=false, botExcutedTime=0, or lifecycleState='detected')
+    // 2. Failed trades that are eligible for retry (lifecycleState='failed', retryCount < RETRY_LIMIT)
+    const now = Date.now();
+    const workerId = getWorkerId();
+
+    const trade = await model
+        .findOneAndUpdate(
+            {
+                type: 'TRADE',
+                $or: [
+                    // New trade (legacy or new format)
+                    { bot: false, botExcutedTime: 0 },
+                    { lifecycleState: 'detected' },
+                    // Claimed but lease expired
+                    {
+                        lifecycleState: 'claimed',
+                        leaseExpiresAt: { $lt: now },
+                    },
+                    // Failed trade eligible for retry
+                    {
+                        lifecycleState: 'failed',
+                        retryCount: { $lt: RETRY_LIMIT },
+                        // Only retry if last retry was more than 30 seconds ago
+                        $or: [
+                            { lastRetryAt: { $exists: false } },
+                            { lastRetryAt: { $lt: Date.now() - 30000 } },
+                        ],
+                    },
+                ],
+            },
+            {
+                $set: {
+                    botExcutedTime: 1,
+                    lifecycleState: 'claimed',
+                    claimedAt: now,
+                    claimedBy: workerId,
+                    leaseExpiresAt: now + LEASE_TIMEOUT_MS,
+                },
+            },
+            {
+                new: true,
+                sort: { timestamp: 1 },
+            }
+        )
+        .exec();
+
+    if (!trade) {
+        return null;
+    }
+
+    return {
+        ...(trade.toObject() as UserActivityInterface),
+        userAddress: address,
+    };
+};
+
 const readTempTrades = async (): Promise<TradeWithUser[]> => {
     const allTrades: TradeWithUser[] = [];
 
     for (const { address, model } of userActivityModels) {
-        // Only get trades that haven't been processed yet (bot: false AND botExcutedTime: 0)
-        // This prevents processing the same trade multiple times
-        const trades = await model
-            .find({
-                $and: [{ type: 'TRADE' }, { bot: false }, { botExcutedTime: 0 }],
-            })
-            .exec();
-
-        const tradesWithUser = trades.map((trade) => ({
-            ...(trade.toObject() as UserActivityInterface),
-            userAddress: address,
-        }));
-
-        allTrades.push(...tradesWithUser);
+        let trade = await claimNextTrade(address, model);
+        while (trade) {
+            allTrades.push(trade);
+            trade = await claimNextTrade(address, model);
+        }
     }
 
     return allTrades;
@@ -146,10 +200,7 @@ const getReadyAggregatedTrades = (): AggregatedTrade[] => {
 
 const doTrading = async (clobClient: ClobClient, trades: TradeWithUser[]) => {
     for (const trade of trades) {
-        // Mark trade as being processed immediately to prevent duplicate processing
-        const UserActivity = getUserActivityModel(trade.userAddress);
-        await UserActivity.updateOne({ _id: trade._id }, { $set: { botExcutedTime: 1 } });
-
+        // Trade was already atomically claimed in readTempTrades/claimNextTrade
         Logger.trade(trade.userAddress, trade.side || 'UNKNOWN', {
             asset: trade.asset,
             side: trade.side,
@@ -210,11 +261,7 @@ const doAggregatedTrading = async (clobClient: ClobClient, aggregatedTrades: Agg
         Logger.info(`Total volume: $${agg.totalUsdcSize.toFixed(2)}`);
         Logger.info(`Average price: $${agg.averagePrice.toFixed(4)}`);
 
-        // Mark all individual trades as being processed
-        for (const trade of agg.trades) {
-            const UserActivity = getUserActivityModel(trade.userAddress);
-            await UserActivity.updateOne({ _id: trade._id }, { $set: { botExcutedTime: 1 } });
-        }
+        // Individual trades were already claimed when added to buffer
 
         const my_positions: UserPositionInterface[] = await fetchData(
             `https://data-api.polymarket.com/positions?user=${PROXY_WALLET}`

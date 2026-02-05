@@ -4,8 +4,17 @@ import fetchData from '../utils/fetchData';
 import Logger from '../utils/logger';
 
 const USER_ADDRESSES = ENV.USER_ADDRESSES;
-const TOO_OLD_TIMESTAMP = ENV.TOO_OLD_TIMESTAMP;
+const TOO_OLD_TIMESTAMP_HOURS = ENV.TOO_OLD_TIMESTAMP_HOURS;
 const FETCH_INTERVAL = ENV.FETCH_INTERVAL;
+
+const getMinTimestampMs = (): number => {
+    return Date.now() - TOO_OLD_TIMESTAMP_HOURS * 60 * 60 * 1000;
+};
+
+const isTradeTimestampValid = (timestamp: number): boolean => {
+    const timestampMs = timestamp < 1e12 ? timestamp * 1000 : timestamp;
+    return timestampMs >= getMinTimestampMs();
+};
 
 if (!USER_ADDRESSES || USER_ADDRESSES.length === 0) {
     throw new Error('USER_ADDRESSES is not defined or empty');
@@ -118,8 +127,8 @@ const fetchTradeData = async () => {
 
             // Process each activity
             for (const activity of activities) {
-                // Skip if too old
-                if (activity.timestamp < TOO_OLD_TIMESTAMP) {
+                // Skip if too old (timestamp is epoch seconds or ms, compare against hours threshold)
+                if (!isTradeTimestampValid(activity.timestamp)) {
                     continue;
                 }
 

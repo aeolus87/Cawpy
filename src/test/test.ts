@@ -1,11 +1,12 @@
-import { ClobClient, OrderType, Side } from '@polymarket/clob-client';
+import { ClobClient, Side } from '@polymarket/clob-client';
 import { ENV } from '../config/env';
 import getMyBalance from '../utils/getMyBalance';
+import { executeOrderGuarded } from '../execution/guardedExecutor';
 
 const USER_ADDRESSES = ENV.USER_ADDRESSES;
 const PROXY_WALLET = ENV.PROXY_WALLET;
 
-const test = async (clobClient: ClobClient) => {
+const runManualTest = async (clobClient: ClobClient) => {
     // const markets = await clobClient.getMarket(
     //     '0x834b371fe993e95cd1aa98a29e77794d5ff6dcaddf71115a6ad522b4b64ec165'
     // );
@@ -33,14 +34,23 @@ const test = async (clobClient: ClobClient) => {
         )
     ).price;
     console.log(price);
-    const signedOrder = await clobClient.createOrder({
-        side: Side.BUY,
-        tokenID: '7335630785946116680591336507965313288831710468958917901279210617913444658937',
-        size: 5,
-        price,
-    });
-    const resp = await clobClient.postOrder(signedOrder, OrderType.GTC);
-    console.log(resp);
+    const result = await executeOrderGuarded(
+        { clobClient },
+        {
+            side: 'BUY',
+            tokenId: '7335630785946116680591336507965313288831710468958917901279210617913444658937',
+            amount: 5,
+            traderPrice: price,
+            tradeUsdcSize: 5,
+            tradeTimestamp: Date.now(),
+            endDate: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+        }
+    );
+    console.log(result);
 };
 
-export default test;
+export default runManualTest;
+
+test('manual trading helper is not executed in Jest', () => {
+    expect(true).toBe(true);
+});

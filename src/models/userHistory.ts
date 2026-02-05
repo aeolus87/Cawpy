@@ -33,6 +33,25 @@ const positionSchema = new Schema({
     negativeRisk: { type: Boolean, required: false },
 });
 
+/**
+ * Trade lifecycle states:
+ * - detected: Trade found in API, not yet processed
+ * - claimed: Trade claimed for processing (atomic lock)
+ * - executing: Order being placed on CLOB
+ * - executed: Order successfully filled
+ * - skipped: Intentionally skipped (viability, slippage, etc.)
+ * - failed: Failed after retries (infra error, retryable)
+ * - reconciled: Position verified against expected
+ */
+export type TradeLifecycleState =
+    | 'detected'
+    | 'claimed'
+    | 'executing'
+    | 'executed'
+    | 'skipped'
+    | 'failed'
+    | 'reconciled';
+
 const activitySchema = new Schema({
     _id: {
         type: Schema.Types.ObjectId,
@@ -60,9 +79,30 @@ const activitySchema = new Schema({
     bio: { type: String, required: false },
     profileImage: { type: String, required: false },
     profileImageOptimized: { type: String, required: false },
+    // Legacy fields (kept for backward compatibility)
     bot: { type: Boolean, required: false },
     botExcutedTime: { type: Number, required: false },
     myBoughtSize: { type: Number, required: false }, // Tracks actual tokens we bought
+    // New lifecycle state fields
+    lifecycleState: { type: String, required: false, default: 'detected' },
+    skipReason: { type: String, required: false }, // Why trade was skipped
+    failureReason: { type: String, required: false }, // Why trade failed
+    retryCount: { type: Number, required: false, default: 0 },
+    lastRetryAt: { type: Number, required: false }, // Timestamp of last retry
+    claimedAt: { type: Number, required: false }, // When trade was claimed
+    executedAt: { type: Number, required: false }, // When trade was executed
+    expectedTokens: { type: Number, required: false }, // Expected tokens from order
+    actualTokens: { type: Number, required: false }, // Actual tokens received
+    // Idempotency and lease fields
+    idempotencyKey: { type: String, required: false }, // Unique key to prevent duplicate execution
+    clobOrderId: { type: String, required: false }, // Order ID from CLOB
+    claimedBy: { type: String, required: false }, // Worker ID that claimed this trade
+    leaseExpiresAt: { type: Number, required: false }, // Lease expiration timestamp
+    // Fill tracking fields
+    intendedSize: { type: Number, required: false }, // Size we intended to fill
+    filledSize: { type: Number, required: false }, // USD amount actually filled
+    avgFillPrice: { type: Number, required: false }, // Average fill price
+    needsManualReview: { type: Boolean, required: false, default: false }, // Flag for ambiguous fills
 });
 
 const getUserPositionModel = (walletAddress: string) => {

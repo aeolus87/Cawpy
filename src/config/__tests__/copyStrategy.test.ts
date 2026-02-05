@@ -4,7 +4,7 @@ import {
     CopyStrategy,
     getTradeMultiplier,
     parseTieredMultipliers,
-    validateCopyStrategyConfig
+    validateCopyStrategyConfig,
 } from '../copyStrategy';
 
 describe('calculateOrderSize', () => {
@@ -193,8 +193,8 @@ describe('getTradeMultiplier', () => {
             { min: 100, max: 500, multiplier: 0.2 },
             { min: 500, max: 1000, multiplier: 0.1 },
             { min: 1000, max: 5000, multiplier: 0.02 },
-            { min: 5000, max: null, multiplier: 0.001 }
-        ]
+            { min: 5000, max: null, multiplier: 0.001 },
+        ],
     };
 
     it('should return correct multiplier for small trades', () => {
@@ -232,7 +232,7 @@ describe('getTradeMultiplier', () => {
             copySize: 10.0,
             maxOrderSizeUSD: 100.0,
             minOrderSizeUSD: 1.0,
-            tradeMultiplier: 2.5
+            tradeMultiplier: 2.5,
         };
         expect(getTradeMultiplier(singleMultiplierConfig, 100)).toBe(2.5);
     });
@@ -240,7 +240,7 @@ describe('getTradeMultiplier', () => {
     it('should prefer tiered multipliers over single multiplier', () => {
         const bothConfig: CopyStrategyConfig = {
             ...tieredConfig,
-            tradeMultiplier: 5.0 // Should be ignored
+            tradeMultiplier: 5.0, // Should be ignored
         };
         expect(getTradeMultiplier(bothConfig, 5)).toBe(2.0); // Uses tiered
     });
@@ -256,8 +256,8 @@ describe('calculateOrderSize with tiered multipliers', () => {
             { min: 1, max: 10, multiplier: 2.0 },
             { min: 10, max: 100, multiplier: 1.0 },
             { min: 100, max: 1000, multiplier: 0.2 },
-            { min: 1000, max: null, multiplier: 0.01 }
-        ]
+            { min: 1000, max: null, multiplier: 0.01 },
+        ],
     };
 
     it('should apply 2.0x multiplier for small trades ($1-$10)', () => {
@@ -298,8 +298,8 @@ describe('calculateOrderSize with tiered multipliers', () => {
             minOrderSizeUSD: 1.0,
             tieredMultipliers: [
                 { min: 1, max: 1000, multiplier: 2.0 },
-                { min: 1000, max: null, multiplier: 0.1 }
-            ]
+                { min: 1000, max: null, multiplier: 0.1 },
+            ],
         };
 
         // Small trader order ($100) → fixed $50 × 2.0x = $100
@@ -311,4 +311,3 @@ describe('calculateOrderSize with tiered multipliers', () => {
         expect(largeResult.finalAmount).toBe(5.0);
     });
 });
-

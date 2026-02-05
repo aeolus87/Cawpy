@@ -1,12 +1,11 @@
-import { AssetType, ClobClient, OrderType, Side } from '@polymarket/clob-client';
+import { AssetType, ClobClient } from '@polymarket/clob-client';
 import { ENV } from '../config/env';
 import createClobClient from '../utils/createClobClient';
 import fetchData from '../utils/fetchData';
+import { executeOrderGuarded } from '../execution/guardedExecutor';
 
 const PROXY_WALLET = ENV.PROXY_WALLET;
 const USER_ADDRESSES = ENV.USER_ADDRESSES;
-const RETRY_LIMIT = ENV.RETRY_LIMIT;
-
 // Polymarket enforces a 1 token minimum on sell orders
 const MIN_SELL_TOKENS = 1.0;
 const ZERO_THRESHOLD = 0.0001;
@@ -30,53 +29,6 @@ interface SellResult {
     remainingTokens: number;
 }
 
-const extractOrderError = (response: unknown): string | undefined => {
-    if (!response) {
-        return undefined;
-    }
-
-    if (typeof response === 'string') {
-        return response;
-    }
-
-    if (typeof response === 'object') {
-        const data = response as Record<string, unknown>;
-
-        const directError = data.error;
-        if (typeof directError === 'string') {
-            return directError;
-        }
-
-        if (typeof directError === 'object' && directError !== null) {
-            const nested = directError as Record<string, unknown>;
-            if (typeof nested.error === 'string') {
-                return nested.error;
-            }
-            if (typeof nested.message === 'string') {
-                return nested.message;
-            }
-        }
-
-        if (typeof data.errorMsg === 'string') {
-            return data.errorMsg;
-        }
-
-        if (typeof data.message === 'string') {
-            return data.message;
-        }
-    }
-
-    return undefined;
-};
-
-const isInsufficientBalanceOrAllowanceError = (message: string | undefined): boolean => {
-    if (!message) {
-        return false;
-    }
-    const lower = message.toLowerCase();
-    return lower.includes('not enough balance') || lower.includes('allowance');
-};
-
 const updatePolymarketCache = async (clobClient: ClobClient, tokenId: string) => {
     try {
         await clobClient.updateBalanceAllowance({
@@ -93,7 +45,6 @@ const sellEntirePosition = async (
     position: Position
 ): Promise<SellResult> => {
     let remaining = position.size;
-    let attempts = 0;
     let soldTokens = 0;
     let proceedsUsd = 0;
 
@@ -106,73 +57,51 @@ const sellEntirePosition = async (
 
     await updatePolymarketCache(clobClient, position.asset);
 
-    while (remaining >= MIN_SELL_TOKENS && attempts < RETRY_LIMIT) {
-        const orderBook = await clobClient.getOrderBook(position.asset);
+    const orderBook = await clobClient.getOrderBook(position.asset);
 
-        if (!orderBook.bids || orderBook.bids.length === 0) {
-            console.log('   ❌ Order book has no bids – liquidity unavailable');
-            break;
-        }
+    if (!orderBook.bids || orderBook.bids.length === 0) {
+        console.log('   ❌ Order book has no bids – liquidity unavailable');
+        return { soldTokens: 0, proceedsUsd: 0, remainingTokens: remaining };
+    }
 
-        const bestBid = orderBook.bids.reduce((max, bid) => {
-            return parseFloat(bid.price) > parseFloat(max.price) ? bid : max;
-        }, orderBook.bids[0]);
+    const bestBid = orderBook.bids.reduce((max, bid) => {
+        return parseFloat(bid.price) > parseFloat(max.price) ? bid : max;
+    }, orderBook.bids[0]);
 
-        const bidSize = parseFloat(bestBid.size);
-        const bidPrice = parseFloat(bestBid.price);
+    const bidPrice = parseFloat(bestBid.price);
+    const sellAmount = Math.min(remaining, parseFloat(bestBid.size));
 
-        if (bidSize < MIN_SELL_TOKENS) {
-            console.log(
-                `   ❌ Best bid only for ${bidSize.toFixed(2)} tokens (< ${MIN_SELL_TOKENS})`
-            );
-            break;
-        }
+    if (sellAmount < MIN_SELL_TOKENS) {
+        console.log(`   ❌ Remaining amount ${sellAmount.toFixed(4)} below minimum sell size`);
+        return { soldTokens: 0, proceedsUsd: 0, remainingTokens: remaining };
+    }
 
-        const sellAmount = Math.min(remaining, bidSize);
-
-        if (sellAmount < MIN_SELL_TOKENS) {
-            console.log(`   ❌ Remaining amount ${sellAmount.toFixed(4)} below minimum sell size`);
-            break;
-        }
-
-        const orderArgs = {
-            side: Side.SELL,
-            tokenID: position.asset,
+    const result = await executeOrderGuarded(
+        { clobClient },
+        {
+            side: 'SELL',
+            tokenId: position.asset,
             amount: sellAmount,
-            price: bidPrice,
-        };
-
-        try {
-            const signedOrder = await clobClient.createMarketOrder(orderArgs);
-            const resp = await clobClient.postOrder(signedOrder, OrderType.FOK);
-
-            if (resp.success === true) {
-                const tradeValue = sellAmount * bidPrice;
-                soldTokens += sellAmount;
-                proceedsUsd += tradeValue;
-                remaining -= sellAmount;
-                attempts = 0;
-                console.log(
-                    `   ✅ Sold ${sellAmount.toFixed(2)} tokens @ $${bidPrice.toFixed(3)} (≈ $${tradeValue.toFixed(2)})`
-                );
-            } else {
-                attempts += 1;
-                const errorMessage = extractOrderError(resp);
-
-                if (isInsufficientBalanceOrAllowanceError(errorMessage)) {
-                    console.log(
-                        `   ❌ Order rejected: ${errorMessage ?? 'balance/allowance issue'}`
-                    );
-                    break;
-                }
-                console.log(
-                    `   ⚠️  Sell attempt ${attempts}/${RETRY_LIMIT} failed${errorMessage ? ` – ${errorMessage}` : ''}`
-                );
-            }
-        } catch (error) {
-            attempts += 1;
-            console.log(`   ⚠️  Sell attempt ${attempts}/${RETRY_LIMIT} threw error:`, error);
+            traderPrice: bidPrice,
+            tradeUsdcSize: sellAmount * bidPrice,
+            myPositionSize: position.size,
+            marketSlug: position.slug || position.title,
+            tradeTimestamp: Date.now(),
         }
+    );
+
+    if (result.executed && result.filledTokens && result.filledTokens > 0) {
+        const tradeValue = result.filledTokens * (result.avgFillPrice || bidPrice);
+        soldTokens += result.filledTokens;
+        proceedsUsd += tradeValue;
+        remaining -= result.filledTokens;
+        console.log(
+            `   ✅ Sold ${result.filledTokens.toFixed(2)} tokens @ $${(result.avgFillPrice || bidPrice).toFixed(3)} (≈ $${tradeValue.toFixed(2)})`
+        );
+    } else if (result.skipped) {
+        console.log(`   ⚠️  Sell skipped: ${result.reason}`);
+    } else if (result.failed) {
+        console.log(`   ❌ Sell failed: ${result.reason}`);
     }
 
     if (remaining >= MIN_SELL_TOKENS) {

@@ -98,6 +98,17 @@ export const main = async () => {
         Logger.info('Starting trade executor...');
         tradeExecutor(clobClient);
 
+        // Start API server if enabled
+        if (process.env.ENABLE_API === 'true') {
+            Logger.info('Starting API server...');
+            import('./server/api').then(({ default: startApiServer }) => {
+                // API server handles its own startup
+                Logger.success('API server started');
+            }).catch(error => {
+                Logger.error(`Failed to start API server: ${error}`);
+            });
+        }
+
         // test(clobClient);
     } catch (error) {
         Logger.error(`Fatal error during startup: ${error}`);

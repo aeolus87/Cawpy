@@ -24,6 +24,11 @@ const validateRequiredEnv = (): void => {
         'USDC_CONTRACT_ADDRESS',
     ];
 
+    // Add API-specific required vars if API is enabled
+    if (process.env.ENABLE_API === 'true') {
+        required.push('JWT_SECRET');
+    }
+
     const missing: string[] = [];
     for (const key of required) {
         if (!process.env[key]) {
@@ -389,4 +394,12 @@ export const ENV = {
     EDGE_MIN_TRADE_PERCENT_OF_POSITION: process.env.EDGE_MIN_TRADE_PERCENT_OF_POSITION
         ? parseFloat(process.env.EDGE_MIN_TRADE_PERCENT_OF_POSITION)
         : 5.0,
+    // API server settings
+    API_PORT: parseInt(process.env.API_PORT || '3001', 10),
+    API_HOST: process.env.API_HOST || 'localhost',
+    JWT_SECRET: process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production',
+    API_RATE_LIMIT_WINDOW_MS: parseInt(process.env.API_RATE_LIMIT_WINDOW_MS || '900000', 10), // 15 minutes
+    API_RATE_LIMIT_MAX_REQUESTS: parseInt(process.env.API_RATE_LIMIT_MAX_REQUESTS || '100', 10),
+    CORS_ORIGIN: process.env.CORS_ORIGIN || 'http://localhost:3000',
+    ENABLE_API_DOCS: process.env.ENABLE_API_DOCS === 'true',
 };

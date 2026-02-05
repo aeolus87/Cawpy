@@ -42,6 +42,12 @@ interface Config {
     FETCH_INTERVAL?: string;
     RETRY_LIMIT?: string;
     TRADE_AGGREGATION_ENABLED?: string;
+    // API Configuration
+    ENABLE_API?: string;
+    API_PORT?: string;
+    API_HOST?: string;
+    JWT_SECRET?: string;
+    CORS_ORIGIN?: string;
 }
 
 function question(prompt: string): Promise<string> {
@@ -299,6 +305,66 @@ async function setupRiskLimits(): Promise<{ maxOrder: string; minOrder: string }
     return { maxOrder: '100.0', minOrder: '1.0' };
 }
 
+async function setupAPI(): Promise<{
+    enableAPI: string;
+    apiPort: string;
+    apiHost: string;
+    jwtSecret: string;
+    corsOrigin: string;
+}> {
+    printSection('API CONFIGURATION (Optional)');
+
+    console.log(`${colors.cyan}The API server allows frontend applications to connect to the bot.${colors.reset}`);
+    console.log(`${colors.cyan}Enable this if you plan to build a web dashboard.${colors.reset}\n`);
+
+    const enableAPI = await question(
+        `${colors.green}Enable API server? (y/n): ${colors.reset}`
+    );
+
+    if (enableAPI.toLowerCase() !== 'y' && enableAPI.toLowerCase() !== 'yes') {
+        return {
+            enableAPI: 'false',
+            apiPort: '3001',
+            apiHost: 'localhost',
+            jwtSecret: '',
+            corsOrigin: 'http://localhost:3000'
+        };
+    }
+
+    const apiPort = await question(
+        `${colors.green}API server port (default: 3001): ${colors.reset}`
+    ) || '3001';
+
+    const apiHost = await question(
+        `${colors.green}API server host (default: localhost): ${colors.reset}`
+    ) || 'localhost';
+
+    console.log(`\n${colors.yellow}⚠️  IMPORTANT: Choose a strong JWT secret for production!${colors.reset}`);
+    console.log(`${colors.yellow}Generate one with: openssl rand -base64 32${colors.reset}\n`);
+
+    let jwtSecret;
+    do {
+        jwtSecret = await question(
+            `${colors.green}JWT secret (required for API): ${colors.reset}`
+        );
+        if (!jwtSecret || jwtSecret.length < 16) {
+            console.log(`${colors.red}❌ JWT secret must be at least 16 characters${colors.reset}`);
+        }
+    } while (!jwtSecret || jwtSecret.length < 16);
+
+    const corsOrigin = await question(
+        `${colors.green}CORS origin for frontend (default: http://localhost:3000): ${colors.reset}`
+    ) || 'http://localhost:3000';
+
+    return {
+        enableAPI: 'true',
+        apiPort,
+        apiHost,
+        jwtSecret,
+        corsOrigin
+    };
+}
+
 function generateEnvFile(config: Config): string {
     const content = `# ================================================================
 # POLYMARKET COPY TRADING BOT - CONFIGURATION
@@ -364,6 +430,15 @@ TRADE_AGGREGATION_WINDOW_SECONDS='300'
 # ================================================================
 REQUEST_TIMEOUT_MS='10000'
 NETWORK_RETRY_LIMIT='3'
+
+# ================================================================
+# API SERVER CONFIGURATION
+# ================================================================
+ENABLE_API='${config.ENABLE_API || 'false'}'
+API_PORT='${config.API_PORT || '3001'}'
+API_HOST='${config.API_HOST || 'localhost'}'
+JWT_SECRET='${config.JWT_SECRET || ''}'
+CORS_ORIGIN='${config.CORS_ORIGIN || 'http://localhost:3000'}'
 `;
 
     return content;
@@ -380,6 +455,7 @@ async function main() {
         const rpcUrl = await setupRPC();
         const strategy = await setupStrategy();
         const limits = await setupRiskLimits();
+        const apiConfig = await setupAPI();
 
         // Build config object
         const config: Config = {
@@ -396,6 +472,11 @@ async function main() {
             TRADE_MULTIPLIER: strategy.tradeMultiplier,
             MAX_ORDER_SIZE_USD: limits.maxOrder,
             MIN_ORDER_SIZE_USD: limits.minOrder,
+            ENABLE_API: apiConfig.enableAPI,
+            API_PORT: apiConfig.apiPort,
+            API_HOST: apiConfig.apiHost,
+            JWT_SECRET: apiConfig.jwtSecret,
+            CORS_ORIGIN: apiConfig.corsOrigin,
         };
 
         // Generate .env file

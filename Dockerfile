@@ -45,12 +45,12 @@ RUN chown -R nodejs:nodejs /app
 # Switch to non-root user
 USER nodejs
 
-# Expose port (if needed for health checks in future)
-EXPOSE 3000
+# Expose port
+EXPOSE 10000
 
 # Use dumb-init to handle signals properly
 ENTRYPOINT ["dumb-init", "--"]
 
-# Start the application
-CMD ["node", "dist/index.js"]
+# Start the API server (web-based configuration)
+CMD ["node", "dist/start-api.js"]
 

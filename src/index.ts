@@ -96,8 +96,7 @@ export const main = async () => {
 
             // Start API server only
             Logger.info('Starting API server...');
-            // API server will be started separately via api.ts
-            return;
+            await import('./server/api');
         }
 
         // Full trading bot mode - dynamically import trading services

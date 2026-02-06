@@ -1,6 +1,6 @@
 # Render Deployment Guide
 
-This guide covers deploying the Polymarket Copy Trading Bot to Render with web-based configuration.
+This guide covers deploying the Polymarket Copy Trading Bot to Render with web-based configuration, including integration with Moniqo as a feature extension.
 
 ## 🚀 Quick Deploy to Render
 
@@ -111,6 +111,76 @@ curl -H "Authorization: Bearer YOUR_JWT_TOKEN" \
 ```env
 VITE_API_URL=https://your-service.onrender.com
 VITE_WS_URL=wss://your-service.onrender.com
+```
+
+## 🔗 Moniqo Integration
+
+Polycopy can be integrated as a feature extension within your Moniqo website. Users who are already logged into Moniqo can access copy trading functionality without separate authentication.
+
+### Integration Setup:
+
+#### 1. Authentication Bridge
+
+Moniqo can authenticate users with Polycopy using shared JWT tokens:
+
+```typescript
+// In Moniqo - Generate Polycopy-compatible token
+const polycopyToken = jwt.sign({
+  moniqoId: user.id,
+  email: user.email,
+  address: user.walletAddress, // Optional
+  role: 'user'
+}, MONIqo_JWT_SECRET, { expiresIn: '24h' });
+
+// Send to Polycopy API
+const response = await fetch('https://polycopy-api.onrender.com/api/auth/login', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    moniqoToken: polycopyToken,
+    moniqoId: user.id,
+    email: user.email
+  })
+});
+```
+
+#### 2. User Account Creation
+
+Create Polycopy accounts for Moniqo users:
+
+```typescript
+// Create Polycopy account for Moniqo user
+await fetch('https://polycopy-api.onrender.com/api/moniqo/user', {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${polycopyToken}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({
+    moniqoId: user.id,
+    email: user.email,
+    walletAddress: user.walletAddress,
+    preferences: user.preferences
+  })
+});
+```
+
+#### 3. Access User Data
+
+Retrieve user's Polycopy configuration:
+
+```typescript
+const userData = await fetch('https://polycopy-api.onrender.com/api/moniqo/user', {
+  headers: { 'Authorization': `Bearer ${polycopyToken}` }
+});
+```
+
+### Moniqo-Polycopy Data Flow:
+
+```
+Moniqo User Login → JWT Token Exchange → Polycopy Account Creation
+                   → Configuration via Web UI → Trading Bot Activation
+                   → Real-time Updates → Portfolio Sync
 ```
 
 ### Frontend Architecture:

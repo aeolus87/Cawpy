@@ -227,7 +227,8 @@ const app = express();
 app.use(helmet());
 app.use(cors({
     origin: ENV.CORS_ORIGIN,
-    credentials: true
+    credentials: true,
+    origin: true // Allow all origins for Moniqo integration
 }));
 
 // Body parsing
@@ -334,28 +335,46 @@ app.get('/health', (req: Request, res: Response) => {
  */
 app.post('/api/auth/login', async (req: Request, res: Response) => {
     try {
-        const { address, signature } = req.body;
+        const { address, signature, moniqoToken, moniqoId, email } = req.body;
 
-        // TODO: Implement proper wallet signature verification
-        // For now, accept any address with admin role for configured addresses
+        let userData: any = {};
+        let token: string;
 
-        const isAdmin = ENV.USER_ADDRESSES.includes(address.toLowerCase());
-        const role = isAdmin ? 'admin' : 'user';
+        // Method 1: Traditional wallet signature (for direct Polycopy users)
+        if (address && signature) {
+            // TODO: Implement proper wallet signature verification
+            // For now, accept any address
+            userData = {
+                address: address.toLowerCase(),
+                role: 'user' // Default role, can be upgraded to admin
+            };
+        }
+        // Method 2: Moniqo token exchange (for Moniqo-integrated users)
+        else if (moniqoToken || moniqoId) {
+            // Accept Moniqo authentication
+            userData = {
+                moniqoId: moniqoId,
+                email: email,
+                address: address, // Optional wallet address from Moniqo
+                role: 'user' // Moniqo users start as regular users
+            };
+        } else {
+            return res.status(400).json({
+                success: false,
+                error: 'Either wallet signature (address + signature) or Moniqo token required',
+                timestamp: Date.now()
+            });
+        }
 
-        const token = jwt.sign(
-            { address: address.toLowerCase(), role },
-            ENV.JWT_SECRET,
-            { expiresIn: '24h' }
-        );
+        // Generate Polycopy JWT token
+        token = jwt.sign(userData, ENV.JWT_SECRET, { expiresIn: '24h' });
 
         res.json({
             success: true,
             data: {
                 token,
-                user: {
-                    address: address.toLowerCase(),
-                    role
-                }
+                user: userData,
+                integration: moniqoId ? 'moniqo' : 'direct'
             },
             timestamp: Date.now()
         } as ApiResponse);
@@ -1138,6 +1157,120 @@ app.post('/api/config/api-keys', authenticateToken, requireAdmin, (req: AuthRequ
         res.status(500).json({
             success: false,
             error: 'Failed to update API credentials',
+            timestamp: Date.now()
+        } as ApiResponse);
+    }
+});
+
+/**
+ * @swagger
+ * /api/moniqo/user:
+ *   post:
+ *     summary: Create or link Moniqo user to Polycopy account
+ *     description: Used by Moniqo to create Polycopy accounts for their users
+ *   get:
+ *     summary: Get Polycopy user data for Moniqo user
+ */
+app.post('/api/moniqo/user', authenticateToken, async (req: AuthRequest, res: Response) => {
+    try {
+        const { moniqoId, email, walletAddress, preferences } = req.body;
+
+        // Validate required fields
+        if (!moniqoId) {
+            return res.status(400).json({
+                success: false,
+                error: 'moniqoId is required',
+                timestamp: Date.now()
+            });
+        }
+
+        // Check if user already exists
+        const existingConfig = loadPersistentConfig();
+        const existingUsers = existingConfig.userAddresses || [];
+
+        // Create user configuration
+        const userConfig: Partial<PersistentConfig> = {
+            moniqoId,
+            email,
+            proxyWallet: walletAddress,
+            // Set defaults for new users
+            tradeMultiplier: 1.0,
+            maxOrderSizeUsd: 1000,
+            minOrderSizeUsd: 1,
+            fetchInterval: 1,
+            maxSlippageBps: 500,
+            tradeAggregationEnabled: false,
+            enableTrading: false, // Start disabled, user enables later
+            copyStrategy: 'proportional'
+        };
+
+        // If this is the first user, set them as admin
+        const isFirstUser = !existingUsers.length;
+        if (isFirstUser) {
+            userConfig.role = 'admin';
+        }
+
+        // Save user configuration
+        savePersistentConfig(userConfig, `moniqo-integration-${moniqoId}`);
+
+        Logger.info(`Moniqo user ${moniqoId} linked to Polycopy account`);
+
+        res.json({
+            success: true,
+            data: {
+                message: 'User account created/linked successfully',
+                userId: moniqoId,
+                isAdmin: isFirstUser,
+                polycopyReady: true
+            },
+            timestamp: Date.now()
+        } as ApiResponse);
+    } catch (error) {
+        Logger.error(`Moniqo user creation error: ${error}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to create user account',
+            timestamp: Date.now()
+        } as ApiResponse);
+    }
+});
+
+app.get('/api/moniqo/user', authenticateToken, (req: AuthRequest, res: Response) => {
+    try {
+        const moniqoId = req.user?.moniqoId;
+
+        if (!moniqoId) {
+            return res.status(400).json({
+                success: false,
+                error: 'No Moniqo user ID found in token',
+                timestamp: Date.now()
+            });
+        }
+
+        // Load user configuration
+        const config = loadPersistentConfig();
+
+        // Find user-specific data (you might want to store per-user configs)
+        const userData = {
+            moniqoId,
+            email: config.email,
+            walletAddress: config.proxyWallet,
+            isConfigured: !!(config.proxyWallet && config.userAddresses?.length),
+            tradingEnabled: config.enableTrading || false,
+            userAddresses: config.userAddresses || [],
+            lastUpdated: config.lastUpdated
+        };
+
+        res.json({
+            success: true,
+            data: userData,
+            timestamp: Date.now()
+        } as ApiResponse);
+    } catch (error) {
+        Logger.error(`Get Moniqo user error: ${error}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to retrieve user data',
             timestamp: Date.now()
         } as ApiResponse);
     }

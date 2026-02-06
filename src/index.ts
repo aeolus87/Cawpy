@@ -69,13 +69,37 @@ export const main = async () => {
             reset: '\x1b[0m',
             yellow: '\x1b[33m',
             cyan: '\x1b[36m',
+            green: '\x1b[32m',
         };
 
-        console.log(`\n${colors.yellow}💡 First time running the bot?${colors.reset}`);
-        console.log(`   Read the guide: ${colors.cyan}GETTING_STARTED.md${colors.reset}`);
-        console.log(`   Run health check: ${colors.cyan}npm run health-check${colors.reset}\n`);
+        console.log(`\n${colors.yellow}🚀 Polymarket Copy Trading Bot${colors.reset}`);
 
         await connectDB();
+
+        // Check if we should start API-only mode (for web deployments)
+        const isApiMode = ENV.ENABLE_API === true && (
+            !USER_ADDRESSES.length ||
+            !PROXY_WALLET ||
+            !ENV.PRIVATE_KEY
+        );
+
+        if (isApiMode) {
+            console.log(`\n${colors.green}🌐 API-Only Mode${colors.reset}`);
+            console.log(`   User configuration will be managed through web interface`);
+            console.log(`   Configure your bot at: ${colors.cyan}http://localhost:${ENV.API_PORT}/api-docs${colors.reset}\n`);
+
+            // Start API server only
+            Logger.info('Starting API server...');
+            // API server will be started separately via api.ts
+            return;
+        }
+
+        // Full trading bot mode
+        console.log(`\n${colors.green}🤖 Full Trading Bot Mode${colors.reset}`);
+        console.log(`   Traders to copy: ${USER_ADDRESSES.length}`);
+        console.log(`   Wallet: ${PROXY_WALLET ? PROXY_WALLET.slice(0, 6) + '...' + PROXY_WALLET.slice(-4) : 'Not set'}`);
+        console.log(`   Run health check: ${colors.cyan}npm run health-check${colors.reset}\n`);
+
         Logger.startup(USER_ADDRESSES, PROXY_WALLET);
 
         // Perform initial health check

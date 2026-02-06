@@ -13,21 +13,30 @@ const isValidEthereumAddress = (address: string): boolean => {
  * Validate required environment variables
  */
 const validateRequiredEnv = (): void => {
-    const required = [
-        'USER_ADDRESSES',
-        'PROXY_WALLET',
-        'PRIVATE_KEY',
-        'CLOB_HTTP_URL',
-        'CLOB_WS_URL',
-        'MONGO_URI',
-        'RPC_URL',
-        'USDC_CONTRACT_ADDRESS',
+    // Infrastructure/system variables (always required)
+    const infrastructure = [
+        'MONGO_URI',           // Database connection
+        'CLOB_HTTP_URL',       // Polymarket API endpoint
+        'CLOB_WS_URL',         // WebSocket endpoint
+        'USDC_CONTRACT_ADDRESS', // USDC contract address
     ];
 
-    // Add API-specific required vars if API is enabled
+    // API-specific variables
     if (process.env.ENABLE_API === 'true') {
-        required.push('JWT_SECRET');
+        infrastructure.push('JWT_SECRET');
     }
+
+    // For web-based deployments, user config can be set via API
+    // These are now optional and can be configured through the frontend
+    const userConfig = [
+        'USER_ADDRESSES',      // Traders to copy (API-managed)
+        'PROXY_WALLET',        // User wallet (API-managed)
+        'PRIVATE_KEY',         // Private key (API-managed)
+        'RPC_URL',             // RPC endpoint (has default)
+    ];
+
+    const required = infrastructure;
+    const optional = userConfig;
 
     const missing: string[] = [];
     for (const key of required) {
@@ -37,14 +46,24 @@ const validateRequiredEnv = (): void => {
     }
 
     if (missing.length > 0) {
-        console.error('\n❌ Configuration Error: Missing required environment variables\n');
+        console.error('\n❌ Configuration Error: Missing required infrastructure variables\n');
         console.error(`Missing variables: ${missing.join(', ')}\n`);
-        console.error('🔧 Quick fix:');
-        console.error('   1. Run the setup wizard: npm run setup');
-        console.error('   2. Or manually create .env file with all required variables\n');
+        console.error('🔧 Required infrastructure variables:');
+        console.error('   - MONGO_URI: MongoDB connection string');
+        console.error('   - CLOB_HTTP_URL: Polymarket API endpoint');
+        console.error('   - CLOB_WS_URL: Polymarket WebSocket endpoint');
+        console.error('   - USDC_CONTRACT_ADDRESS: USDC contract address');
+        if (process.env.ENABLE_API === 'true') {
+            console.error('   - JWT_SECRET: JWT secret for API authentication');
+        }
+        console.error('\n💡 User configuration (traders, wallet, etc.) can be set via web interface\n');
         console.error('📖 See docs/QUICK_START.md for detailed instructions\n');
-        throw new Error(`Missing required environment variables: ${missing.join(', ')}`);
+        throw new Error(`Missing required infrastructure variables: ${missing.join(', ')}`);
     }
+
+    // Log optional variables that can be configured via API
+    console.log('✅ Infrastructure variables loaded successfully');
+    console.log('💡 User configuration can be managed through the web interface at /api/config');
 };
 
 /**
@@ -342,9 +361,10 @@ const parseCopyStrategy = (): CopyStrategyConfig => {
 };
 
 export const ENV = {
-    USER_ADDRESSES: parseUserAddresses(process.env.USER_ADDRESSES as string),
-    PROXY_WALLET: process.env.PROXY_WALLET as string,
-    PRIVATE_KEY: process.env.PRIVATE_KEY as string,
+    // User configuration (can be empty, configured via API)
+    USER_ADDRESSES: parseUserAddresses(process.env.USER_ADDRESSES || ''),
+    PROXY_WALLET: process.env.PROXY_WALLET || '',
+    PRIVATE_KEY: process.env.PRIVATE_KEY || '',
     CLOB_HTTP_URL: process.env.CLOB_HTTP_URL as string,
     CLOB_WS_URL: process.env.CLOB_WS_URL as string,
     FETCH_INTERVAL: parseInt(process.env.FETCH_INTERVAL || '1', 10),
@@ -368,7 +388,7 @@ export const ENV = {
         10
     ), // 5 minutes default
     MONGO_URI: process.env.MONGO_URI as string,
-    RPC_URL: process.env.RPC_URL as string,
+    RPC_URL: process.env.RPC_URL || 'https://polygon-rpc.com',
     USDC_CONTRACT_ADDRESS: process.env.USDC_CONTRACT_ADDRESS as string,
     // Market viability settings
     VIABILITY_PRICE_LIMIT: process.env.VIABILITY_PRICE_LIMIT

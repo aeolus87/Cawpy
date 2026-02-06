@@ -8,6 +8,8 @@
         "setup": "ts-node src/scripts/setup.ts",
         "build": "tsc",
         "start": "node dist/index.js",
+        "start:render": "npm run build && node dist/start-api.js",
+        "start:api": "ts-node src/start-api.ts",
         "dev": "ts-node src/index.ts",
         "api": "ts-node src/server/api.ts",
         "api:dev": "nodemon --exec ts-node src/server/api.ts",

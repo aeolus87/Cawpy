@@ -15,16 +15,12 @@ import * as jwt from 'jsonwebtoken';
 import { ENV } from '../config/env';
 import Logger from '../utils/logger';
 
-// Import services
-import tradeExecutor, { stopTradeExecutor } from '../services/tradeExecutor';
-import tradeMonitor, { stopTradeMonitor } from '../services/tradeMonitor';
-import { runReconciliation, markTradesReconciled } from '../services/reconciliation';
-import { getUserActivityModel, getUserPositionModel } from '../models/userHistory';
+// NOTE: Trading services (tradeExecutor, tradeMonitor, reconciliation) are
+// loaded dynamically via await import() inside their endpoints to prevent
+// their top-level code from executing in API-only mode.
 
 // Import utilities
 import fetchData from '../utils/fetchData';
-import getMyBalance from '../utils/getMyBalance';
-import createClobClient from '../utils/createClobClient';
 import { authenticateToken, requireAdmin, AuthRequest } from '../utils/auth.middleware';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -455,7 +451,9 @@ app.post('/api/trading/start', authenticateToken, requireAdmin, async (req: Auth
  */
 app.post('/api/trading/stop', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
     try {
-        // Stop the trading executor
+        // Dynamically import trading services only when needed
+        const { stopTradeExecutor } = await import('../services/tradeExecutor');
+        const { stopTradeMonitor } = await import('../services/tradeMonitor');
         stopTradeExecutor();
         stopTradeMonitor();
 
@@ -652,6 +650,7 @@ app.get('/api/analytics/trades', authenticateToken, async (req: AuthRequest, res
         }
 
         for (const address of addresses) {
+            const { getUserActivityModel } = await import('../models/userHistory');
             const UserActivity = getUserActivityModel(address);
             const trades = await UserActivity.find()
                 .sort({ timestamp: -1 })
@@ -704,6 +703,7 @@ app.get('/api/analytics/trades', authenticateToken, async (req: AuthRequest, res
  */
 app.post('/api/reconciliation/run', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
     try {
+        const { runReconciliation } = await import('../services/reconciliation');
         const result = await runReconciliation();
 
         res.json({

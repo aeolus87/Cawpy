@@ -3,7 +3,6 @@ import { getUserActivityModel, getUserPositionModel } from '../models/userHistor
 import fetchData from '../utils/fetchData';
 import Logger from '../utils/logger';
 
-const USER_ADDRESSES = ENV.USER_ADDRESSES;
 const TOO_OLD_TIMESTAMP_HOURS = ENV.TOO_OLD_TIMESTAMP_HOURS;
 const FETCH_INTERVAL = ENV.FETCH_INTERVAL;
 
@@ -16,25 +15,40 @@ const isTradeTimestampValid = (timestamp: number): boolean => {
     return timestampMs >= getMinTimestampMs();
 };
 
-if (!USER_ADDRESSES || USER_ADDRESSES.length === 0) {
-    throw new Error('USER_ADDRESSES is not defined or empty');
-}
+// Lazy initialization - only create models when actually starting the service
+let userModels: Array<{
+    address: string;
+    UserActivity: any;
+    UserPosition: any;
+}> | null = null;
 
-// Create activity and position models for each user
-const userModels = USER_ADDRESSES.map((address) => ({
-    address,
-    UserActivity: getUserActivityModel(address),
-    UserPosition: getUserPositionModel(address),
-}));
+const getUserModels = () => {
+    if (!userModels) {
+        const USER_ADDRESSES = ENV.USER_ADDRESSES;
+        if (!USER_ADDRESSES || USER_ADDRESSES.length === 0) {
+            throw new Error('USER_ADDRESSES is not defined or empty');
+        }
+        userModels = USER_ADDRESSES.map((address) => ({
+            address,
+            UserActivity: getUserActivityModel(address),
+            UserPosition: getUserPositionModel(address),
+        }));
+    }
+    return userModels;
+};
 
 const init = async () => {
     const counts: number[] = [];
-    for (const { address, UserActivity } of userModels) {
+    for (const { address, UserActivity } of getUserModels()) {
         const count = await UserActivity.countDocuments();
         counts.push(count);
     }
     Logger.clearLine();
-    Logger.dbConnection(USER_ADDRESSES, counts);
+    const userAddresses = ENV.USER_ADDRESSES;
+    if (!userAddresses || userAddresses.length === 0) {
+        throw new Error('USER_ADDRESSES is not defined or empty');
+    }
+    Logger.dbConnection(userAddresses, counts);
 
     // Show your own positions first
     try {
@@ -87,14 +101,14 @@ const init = async () => {
     const positionCounts: number[] = [];
     const positionDetails: any[][] = [];
     const profitabilities: number[] = [];
-    for (const { address, UserPosition } of userModels) {
+    for (const { address, UserPosition } of getUserModels()) {
         const positions = await UserPosition.find().exec();
         positionCounts.push(positions.length);
 
         // Calculate overall profitability (weighted average by current value)
         let totalValue = 0;
         let weightedPnl = 0;
-        positions.forEach((pos) => {
+        positions.forEach((pos: any) => {
             const value = pos.currentValue || 0;
             const pnl = pos.percentPnl || 0;
             totalValue += value;
@@ -105,17 +119,21 @@ const init = async () => {
 
         // Get top 3 positions by profitability (PnL)
         const topPositions = positions
-            .sort((a, b) => (b.percentPnl || 0) - (a.percentPnl || 0))
+            .sort((a: any, b: any) => (b.percentPnl || 0) - (a.percentPnl || 0))
             .slice(0, 3)
-            .map((p) => p.toObject());
+            .map((p: any) => p.toObject());
         positionDetails.push(topPositions);
     }
     Logger.clearLine();
-    Logger.tradersPositions(USER_ADDRESSES, positionCounts, positionDetails, profitabilities);
+    const traderAddresses = ENV.USER_ADDRESSES;
+    if (!traderAddresses || traderAddresses.length === 0) {
+        throw new Error('USER_ADDRESSES is not defined or empty');
+    }
+    Logger.tradersPositions(traderAddresses, positionCounts, positionDetails, profitabilities);
 };
 
 const fetchTradeData = async () => {
-    for (const { address, UserActivity, UserPosition } of userModels) {
+    for (const { address, UserActivity, UserPosition } of getUserModels()) {
         try {
             // Fetch trade activities from Polymarket API
             const apiUrl = `https://data-api.polymarket.com/activity?user=${address}&type=TRADE`;
@@ -235,13 +253,17 @@ export const stopTradeMonitor = () => {
 
 const tradeMonitor = async () => {
     await init();
-    Logger.success(`Monitoring ${USER_ADDRESSES.length} trader(s) every ${FETCH_INTERVAL}s`);
+        const userAddresses = ENV.USER_ADDRESSES;
+        if (!userAddresses || userAddresses.length === 0) {
+            throw new Error('USER_ADDRESSES is not defined or empty');
+        }
+        Logger.success(`Monitoring ${userAddresses.length} trader(s) every ${FETCH_INTERVAL}s`);
     Logger.separator();
 
     // On first run, mark all existing historical trades as already processed
     if (isFirstRun) {
         Logger.info('First run: marking all historical trades as processed...');
-        for (const { address, UserActivity } of userModels) {
+        for (const { address, UserActivity } of getUserModels()) {
             const count = await UserActivity.updateMany(
                 { bot: false },
                 { $set: { bot: true, botExcutedTime: 999 } }

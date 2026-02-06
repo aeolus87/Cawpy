@@ -8,19 +8,47 @@ import postOrder from '../utils/postOrder';
 import Logger from '../utils/logger';
 import { getWorkerId } from '../utils/leaseManager';
 
-const USER_ADDRESSES = ENV.USER_ADDRESSES;
 const RETRY_LIMIT = ENV.RETRY_LIMIT;
-const PROXY_WALLET = ENV.PROXY_WALLET;
 const TRADE_AGGREGATION_ENABLED = ENV.TRADE_AGGREGATION_ENABLED;
 const TRADE_AGGREGATION_WINDOW_SECONDS = ENV.TRADE_AGGREGATION_WINDOW_SECONDS;
 const TRADE_AGGREGATION_MIN_TOTAL_USD = 1.0; // Polymarket minimum
 const LEASE_TIMEOUT_MS = 30000;
 
-// Create activity models for each user
-const userActivityModels = USER_ADDRESSES.map((address) => ({
-    address,
-    model: getUserActivityModel(address),
-}));
+// Lazy initialization - only create models when actually starting the service
+let userActivityModels: Array<{
+    address: string;
+    model: any;
+}> | null = null;
+
+const getUserActivityModels = () => {
+    if (!userActivityModels) {
+        const USER_ADDRESSES = ENV.USER_ADDRESSES;
+        if (!USER_ADDRESSES || USER_ADDRESSES.length === 0) {
+            throw new Error('USER_ADDRESSES is not defined or empty');
+        }
+        userActivityModels = USER_ADDRESSES.map((address) => ({
+            address,
+            model: getUserActivityModel(address),
+        }));
+    }
+    return userActivityModels;
+};
+
+const getProxyWallet = () => {
+    const wallet = ENV.PROXY_WALLET;
+    if (!wallet) {
+        throw new Error('PROXY_WALLET is not defined');
+    }
+    return wallet;
+};
+
+const getUserAddresses = () => {
+    const addresses = ENV.USER_ADDRESSES;
+    if (!addresses || addresses.length === 0) {
+        throw new Error('USER_ADDRESSES is not defined or empty');
+    }
+    return addresses;
+};
 
 interface TradeWithUser extends UserActivityInterface {
     userAddress: string;
@@ -107,7 +135,7 @@ const claimNextTrade = async (
 const readTempTrades = async (): Promise<TradeWithUser[]> => {
     const allTrades: TradeWithUser[] = [];
 
-    for (const { address, model } of userActivityModels) {
+    for (const { address, model } of getUserActivityModels()) {
         let trade = await claimNextTrade(address, model);
         while (trade) {
             allTrades.push(trade);
@@ -212,7 +240,7 @@ const doTrading = async (clobClient: ClobClient, trades: TradeWithUser[]) => {
         });
 
         const my_positions: UserPositionInterface[] = await fetchData(
-            `https://data-api.polymarket.com/positions?user=${PROXY_WALLET}`
+            `https://data-api.polymarket.com/positions?user=${getProxyWallet()}`
         );
         const user_positions: UserPositionInterface[] = await fetchData(
             `https://data-api.polymarket.com/positions?user=${trade.userAddress}`
@@ -225,7 +253,7 @@ const doTrading = async (clobClient: ClobClient, trades: TradeWithUser[]) => {
         );
 
         // Get USDC balance
-        const my_balance = await getMyBalance(PROXY_WALLET);
+        const my_balance = await getMyBalance(getProxyWallet());
 
         // Calculate trader's total portfolio value from positions
         const user_balance = user_positions.reduce((total, pos) => {
@@ -264,7 +292,7 @@ const doAggregatedTrading = async (clobClient: ClobClient, aggregatedTrades: Agg
         // Individual trades were already claimed when added to buffer
 
         const my_positions: UserPositionInterface[] = await fetchData(
-            `https://data-api.polymarket.com/positions?user=${PROXY_WALLET}`
+            `https://data-api.polymarket.com/positions?user=${getProxyWallet()}`
         );
         const user_positions: UserPositionInterface[] = await fetchData(
             `https://data-api.polymarket.com/positions?user=${agg.userAddress}`
@@ -277,7 +305,7 @@ const doAggregatedTrading = async (clobClient: ClobClient, aggregatedTrades: Agg
         );
 
         // Get USDC balance
-        const my_balance = await getMyBalance(PROXY_WALLET);
+        const my_balance = await getMyBalance(getProxyWallet());
 
         // Calculate trader's total portfolio value from positions
         const user_balance = user_positions.reduce((total, pos) => {
@@ -322,7 +350,7 @@ export const stopTradeExecutor = () => {
 };
 
 const tradeExecutor = async (clobClient: ClobClient) => {
-    Logger.success(`Trade executor ready for ${USER_ADDRESSES.length} trader(s)`);
+    Logger.success(`Trade executor ready for ${getUserAddresses().length} trader(s)`);
     if (TRADE_AGGREGATION_ENABLED) {
         Logger.info(
             `Trade aggregation enabled: ${TRADE_AGGREGATION_WINDOW_SECONDS}s window, $${TRADE_AGGREGATION_MIN_TOTAL_USD} minimum`
@@ -376,11 +404,11 @@ const tradeExecutor = async (clobClient: ClobClient) => {
                     const bufferedCount = tradeAggregationBuffer.size;
                     if (bufferedCount > 0) {
                         Logger.waiting(
-                            USER_ADDRESSES.length,
+                            getUserAddresses().length,
                             `${bufferedCount} trade group(s) pending`
                         );
                     } else {
-                        Logger.waiting(USER_ADDRESSES.length);
+                        Logger.waiting(getUserAddresses().length);
                     }
                     lastCheck = Date.now();
                 }
@@ -397,7 +425,7 @@ const tradeExecutor = async (clobClient: ClobClient) => {
             } else {
                 // Update waiting message every 300ms for smooth animation
                 if (Date.now() - lastCheck > 300) {
-                    Logger.waiting(USER_ADDRESSES.length);
+                    Logger.waiting(getUserAddresses().length);
                     lastCheck = Date.now();
                 }
             }

@@ -1,11 +1,6 @@
 import connectDB, { closeDB } from './config/db';
 import { ENV } from './config/env';
-import createClobClient from './utils/createClobClient';
-import tradeExecutor, { stopTradeExecutor } from './services/tradeExecutor';
-import tradeMonitor, { stopTradeMonitor } from './services/tradeMonitor';
 import Logger from './utils/logger';
-import { performHealthCheck, logHealthCheck } from './utils/healthCheck';
-import test from './test/test';
 
 const USER_ADDRESSES = ENV.USER_ADDRESSES;
 const PROXY_WALLET = ENV.PROXY_WALLET;
@@ -24,9 +19,16 @@ const gracefulShutdown = async (signal: string) => {
     Logger.info(`Received ${signal}, initiating graceful shutdown...`);
 
     try {
-        // Stop services
-        stopTradeMonitor();
-        stopTradeExecutor();
+        // Conditionally stop trading services if they were started
+        try {
+            const { stopTradeMonitor } = await import('./services/tradeMonitor');
+            const { stopTradeExecutor } = await import('./services/tradeExecutor');
+            stopTradeMonitor();
+            stopTradeExecutor();
+        } catch (error) {
+            // Trading services may not have been started in API-only mode
+            Logger.info('Trading services not running (API-only mode)');
+        }
 
         // Give services time to finish current operations
         Logger.info('Waiting for services to finish current operations...');
@@ -94,11 +96,17 @@ export const main = async () => {
             return;
         }
 
-        // Full trading bot mode
+        // Full trading bot mode - dynamically import trading services
         console.log(`\n${colors.green}🤖 Full Trading Bot Mode${colors.reset}`);
         console.log(`   Traders to copy: ${USER_ADDRESSES.length}`);
         console.log(`   Wallet: ${PROXY_WALLET ? PROXY_WALLET.slice(0, 6) + '...' + PROXY_WALLET.slice(-4) : 'Not set'}`);
         console.log(`   Run health check: ${colors.cyan}npm run health-check${colors.reset}\n`);
+
+        // Dynamically import trading services only when needed
+        const { default: createClobClient } = await import('./utils/createClobClient');
+        const { default: tradeExecutor, stopTradeExecutor } = await import('./services/tradeExecutor');
+        const { default: tradeMonitor, stopTradeMonitor } = await import('./services/tradeMonitor');
+        const { performHealthCheck, logHealthCheck } = await import('./utils/healthCheck');
 
         Logger.startup(USER_ADDRESSES, PROXY_WALLET);
 

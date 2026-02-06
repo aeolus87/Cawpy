@@ -416,7 +416,7 @@ export const ENV = {
         : 5.0,
     // API server settings
     API_PORT: parseInt(process.env.API_PORT || '3001', 10),
-    API_HOST: process.env.API_HOST || 'localhost',
+    API_HOST: process.env.API_HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : 'localhost'),
     JWT_SECRET: process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production',
     API_RATE_LIMIT_WINDOW_MS: parseInt(process.env.API_RATE_LIMIT_WINDOW_MS || '900000', 10), // 15 minutes
     API_RATE_LIMIT_MAX_REQUESTS: parseInt(process.env.API_RATE_LIMIT_MAX_REQUESTS || '100', 10),

@@ -1395,14 +1395,25 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
 // Server Startup
 // ============================================================================
 
-const PORT = ENV.API_PORT;
-const HOST = ENV.API_HOST;
+// Use Render's PORT environment variable, fallback to config
+const PORT = parseInt(process.env.PORT || ENV.API_PORT.toString(), 10);
+// For Render/containerized deployments, always use 0.0.0.0
+const HOST = process.env.RENDER || process.env.NODE_ENV === 'production' ? '0.0.0.0' : ENV.API_HOST;
+
+console.log(`🔍 Starting server on port ${PORT}, host ${HOST}`);
+console.log(`🔍 process.env.PORT: ${process.env.PORT}`);
+console.log(`🔍 ENV.API_PORT: ${ENV.API_PORT}`);
 
 app.listen(PORT, HOST, () => {
+    console.log(`✅ Server callback executed - listening on ${HOST}:${PORT}`);
     Logger.success(`🚀 PolyCopy API server running on http://${HOST}:${PORT}`);
     Logger.info(`📚 API docs available at http://${HOST}:${PORT}/api-docs (if enabled)`);
     Logger.info(`🔐 JWT Secret: ${ENV.JWT_SECRET.substring(0, 8)}...`);
     Logger.info(`⚡ Rate limit: ${ENV.API_RATE_LIMIT_MAX_REQUESTS} requests per ${ENV.API_RATE_LIMIT_WINDOW_MS / 1000}s`);
+    Logger.info(`🌐 Listening on port ${PORT} (Render: ${process.env.PORT ? 'Yes' : 'No'})`);
+}).on('error', (err) => {
+    console.error(`❌ Server failed to start:`, err);
+    process.exit(1);
 });
 
 export default app;

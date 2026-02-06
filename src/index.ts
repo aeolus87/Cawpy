@@ -76,17 +76,21 @@ export const main = async () => {
 
         console.log(`\n${colors.yellow}🚀 Polymarket Copy Trading Bot${colors.reset}`);
 
-        await connectDB();
+        const dbConnected = await connectDB();
 
         // Check if we should start API-only mode (for web deployments)
         const isApiMode = ENV.ENABLE_API === true && (
             !USER_ADDRESSES.length ||
             !PROXY_WALLET ||
-            !ENV.PRIVATE_KEY
+            !ENV.PRIVATE_KEY ||
+            !dbConnected // Database not connected
         );
 
         if (isApiMode) {
             console.log(`\n${colors.green}🌐 API-Only Mode${colors.reset}`);
+            if (!dbConnected) {
+                console.log(`   ${colors.yellow}⚠️ Database not connected - using in-memory storage${colors.reset}`);
+            }
             console.log(`   User configuration will be managed through web interface`);
             console.log(`   Configure your bot at: ${colors.cyan}http://localhost:${ENV.API_PORT}/api-docs${colors.reset}\n`);
 

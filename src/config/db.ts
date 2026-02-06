@@ -8,8 +8,18 @@ const connectDB = async () => {
     try {
         await mongoose.connect(uri);
         console.log(chalk.green('✓'), 'MongoDB connected');
+        return true;
     } catch (error) {
-        console.log(chalk.red('✗'), 'MongoDB connection failed:', error);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        console.log(chalk.red('✗'), 'MongoDB connection failed:', errorMessage);
+
+        // In API-only mode, don't exit - just log and continue
+        if (process.env.ENABLE_API === 'true') {
+            console.log(chalk.yellow('⚠️'), 'Continuing in API-only mode without database');
+            return false;
+        }
+
+        // In full trading mode, exit on database failure
         process.exit(1);
     }
 };

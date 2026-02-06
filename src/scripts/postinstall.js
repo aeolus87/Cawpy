@@ -5,8 +5,8 @@
  * Skips in CI environments to avoid build failures
  */
 
-// Skip in CI environments
-if (process.env.CI || process.env.CONTINUOUS_INTEGRATION || process.env.GITHUB_ACTIONS) {
+// Skip in CI/production environments
+if (process.env.CI || process.env.CONTINUOUS_INTEGRATION || process.env.GITHUB_ACTIONS || process.env.NODE_ENV === 'production' || process.env.RENDER) {
     process.exit(0);
 }
 

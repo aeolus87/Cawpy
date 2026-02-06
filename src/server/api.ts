@@ -25,7 +25,7 @@ import { getUserActivityModel, getUserPositionModel } from '../models/userHistor
 import fetchData from '../utils/fetchData';
 import getMyBalance from '../utils/getMyBalance';
 import createClobClient from '../utils/createClobClient';
-import { authenticateToken, requireAdmin } from '../utils/auth.middleware';
+import { authenticateToken, requireAdmin, AuthRequest } from '../utils/auth.middleware';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -36,6 +36,11 @@ import * as path from 'path';
 const CONFIG_FILE_PATH = path.join(process.cwd(), 'config.json');
 
 interface PersistentConfig {
+    // User identification
+    moniqoId?: string;
+    email?: string;
+    role?: string;
+
     // User addresses
     userAddresses?: string[];
 
@@ -187,12 +192,6 @@ updateEnvironmentFromConfig();
 // Types & Interfaces
 // ============================================================================
 
-interface AuthRequest extends Request {
-    user?: {
-        address: string;
-        role: 'admin' | 'user';
-    };
-}
 
 interface ApiResponse<T = any> {
     success: boolean;
@@ -226,9 +225,8 @@ const app = express();
 // Security middleware
 app.use(helmet());
 app.use(cors({
-    origin: ENV.CORS_ORIGIN,
-    credentials: true,
-    origin: true // Allow all origins for Moniqo integration
+    origin: true, // Allow all origins for Moniqo integration
+    credentials: true
 }));
 
 // Body parsing
@@ -856,7 +854,7 @@ app.put('/api/config', authenticateToken, requireAdmin, async (req: AuthRequest,
         if (updates.corsOrigin !== undefined) configUpdates.corsOrigin = updates.corsOrigin;
         if (updates.enabled !== undefined) configUpdates.enableTrading = updates.enabled;
 
-        savePersistentConfig(configUpdates, req.user!.address);
+        savePersistentConfig(configUpdates, req.user!.address || req.user!.moniqoId || 'unknown');
 
         // Update runtime environment
         updateEnvironmentFromConfig();
@@ -933,7 +931,7 @@ app.post('/api/config/user-addresses', authenticateToken, requireAdmin, (req: Au
         currentAddresses.push(address.toLowerCase());
 
         // Persist the updated addresses
-        savePersistentConfig({ userAddresses: currentAddresses }, req.user!.address);
+        savePersistentConfig({ userAddresses: currentAddresses }, req.user!.address || req.user!.moniqoId || 'unknown');
 
         // Update runtime environment
         updateEnvironmentFromConfig();
@@ -971,7 +969,7 @@ app.delete('/api/config/user-addresses/:address', authenticateToken, requireAdmi
         }
 
         // Persist the updated addresses
-        savePersistentConfig({ userAddresses: filteredAddresses }, req.user!.address);
+        savePersistentConfig({ userAddresses: filteredAddresses }, req.user!.address || req.user!.moniqoId || 'unknown');
 
         // Update runtime environment
         updateEnvironmentFromConfig();
@@ -1055,7 +1053,7 @@ app.post('/api/config/wallet', authenticateToken, requireAdmin, (req: AuthReques
         if (proxyWallet) walletUpdates.proxyWallet = proxyWallet;
         if (privateKey) walletUpdates.privateKey = privateKey;
 
-        savePersistentConfig(walletUpdates, req.user!.address);
+        savePersistentConfig(walletUpdates, req.user!.address || req.user!.moniqoId || 'unknown');
 
         // Update runtime environment
         updateEnvironmentFromConfig();
@@ -1135,7 +1133,7 @@ app.post('/api/config/api-keys', authenticateToken, requireAdmin, (req: AuthRequ
             clobApiKey: apiKey,
             clobSecret: secret,
             clobPassPhrase: passphrase
-        }, req.user!.address);
+        }, req.user!.address || req.user!.moniqoId || 'unknown');
 
         // Update runtime environment
         updateEnvironmentFromConfig();
@@ -1351,7 +1349,7 @@ app.post('/api/config/setup', authenticateToken, requireAdmin, async (req: AuthR
         if (setupData.maxSlippageBps) setupConfig.maxSlippageBps = setupData.maxSlippageBps;
 
         // Persist complete setup
-        savePersistentConfig(setupConfig, req.user!.address);
+        savePersistentConfig(setupConfig, req.user!.address || req.user!.moniqoId || 'unknown');
 
         // Update runtime environment
         updateEnvironmentFromConfig();

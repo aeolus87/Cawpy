@@ -222,6 +222,9 @@ const limiter = rateLimit({
 
 const app = express();
 
+// Trust proxy for Render/reverse proxy deployments (fixes rate limiter X-Forwarded-For error)
+app.set('trust proxy', 1);
+
 // Security middleware
 app.use(helmet());
 app.use(cors({
@@ -488,7 +491,17 @@ app.post('/api/trading/stop', authenticateToken, requireAdmin, async (req: AuthR
  */
 app.get('/api/positions', authenticateToken, async (req: AuthRequest, res: Response) => {
     try {
-        const positionsUrl = `https://data-api.polymarket.com/positions?user=${ENV.PROXY_WALLET}`;
+        const wallet = ENV.PROXY_WALLET;
+        if (!wallet) {
+            return res.json({
+                success: true,
+                data: [],
+                message: 'No wallet configured. Set up your wallet via /api/config/wallet',
+                timestamp: Date.now()
+            } as ApiResponse);
+        }
+
+        const positionsUrl = `https://data-api.polymarket.com/positions?user=${wallet}`;
         const positions = await fetchData(positionsUrl);
 
         res.json({
@@ -627,8 +640,18 @@ app.get('/api/analytics/trades', authenticateToken, async (req: AuthRequest, res
 
         // Get trades from all configured users
         const allTrades: any[] = [];
+        const addresses = ENV.USER_ADDRESSES || [];
 
-        for (const address of ENV.USER_ADDRESSES) {
+        if (addresses.length === 0) {
+            return res.json({
+                success: true,
+                data: { trades: [], count: 0, offset, limit },
+                message: 'No trader addresses configured. Add traders via /api/config/user-addresses',
+                timestamp: Date.now()
+            } as ApiResponse);
+        }
+
+        for (const address of addresses) {
             const UserActivity = getUserActivityModel(address);
             const trades = await UserActivity.find()
                 .sort({ timestamp: -1 })

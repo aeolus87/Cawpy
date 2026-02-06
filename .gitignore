@@ -46,6 +46,9 @@ jest-test-results.json
 .eslintcache
 .prettiercache
 
+# Configuration file (contains sensitive data)
+config.json
+
 .yarn
 simulation_results
 trader_data_cache

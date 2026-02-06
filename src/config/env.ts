@@ -402,4 +402,16 @@ export const ENV = {
     API_RATE_LIMIT_MAX_REQUESTS: parseInt(process.env.API_RATE_LIMIT_MAX_REQUESTS || '100', 10),
     CORS_ORIGIN: process.env.CORS_ORIGIN || 'http://localhost:3000',
     ENABLE_API_DOCS: process.env.ENABLE_API_DOCS === 'true',
+    // Trading limits
+    MAX_ORDER_SIZE_USD: parseFloat(process.env.MAX_ORDER_SIZE_USD || '1000'),
+    MIN_ORDER_SIZE_USD: parseFloat(process.env.MIN_ORDER_SIZE_USD || '1'),
+    // API and trading enablement
+    ENABLE_API: process.env.ENABLE_API === 'true',
+    ENABLE_TRADING: process.env.ENABLE_TRADING !== 'false', // Default to true
+    // Copy strategy
+    COPY_STRATEGY: process.env.COPY_STRATEGY || 'proportional',
+    // Polymarket API credentials (for API endpoints)
+    CLOB_API_KEY: process.env.CLOB_API_KEY || '',
+    CLOB_SECRET: process.env.CLOB_SECRET || '',
+    CLOB_PASS_PHRASE: process.env.CLOB_PASS_PHRASE || '',
 };

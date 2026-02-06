@@ -25,6 +25,163 @@ import { getUserActivityModel, getUserPositionModel } from '../models/userHistor
 import fetchData from '../utils/fetchData';
 import getMyBalance from '../utils/getMyBalance';
 import createClobClient from '../utils/createClobClient';
+import { authenticateToken, requireAdmin } from '../utils/auth.middleware';
+import * as fs from 'fs';
+import * as path from 'path';
+
+// ============================================================================
+// Configuration Persistence
+// ============================================================================
+
+const CONFIG_FILE_PATH = path.join(process.cwd(), 'config.json');
+
+interface PersistentConfig {
+    // User addresses
+    userAddresses?: string[];
+
+    // Wallet credentials (encrypted in production)
+    proxyWallet?: string;
+    privateKey?: string;
+
+    // API credentials
+    clobApiKey?: string;
+    clobSecret?: string;
+    clobPassPhrase?: string;
+
+    // Trading settings
+    tradeMultiplier?: number;
+    maxOrderSizeUsd?: number;
+    minOrderSizeUsd?: number;
+    fetchInterval?: number;
+    retryLimit?: number;
+    maxSlippageBps?: number;
+    tradeAggregationEnabled?: boolean;
+
+    // Network settings
+    mongoUri?: string;
+    rpcUrl?: string;
+    clobHttpUrl?: string;
+    clobWsUrl?: string;
+    usdcContractAddress?: string;
+
+    // API settings
+    enableApi?: boolean;
+    apiPort?: number;
+    apiHost?: string;
+    jwtSecret?: string;
+    corsOrigin?: string;
+
+    // Bot settings
+    enableTrading?: boolean;
+    copyStrategy?: string;
+
+    // Metadata
+    lastUpdated: string;
+    updatedBy: string;
+}
+
+function loadPersistentConfig(): Partial<PersistentConfig> {
+    try {
+        if (fs.existsSync(CONFIG_FILE_PATH)) {
+            const configData = fs.readFileSync(CONFIG_FILE_PATH, 'utf8');
+            return JSON.parse(configData);
+        }
+    } catch (error) {
+        Logger.error(`Failed to load persistent config: ${error}`);
+    }
+    return {};
+}
+
+function savePersistentConfig(config: Partial<PersistentConfig>, updatedBy: string): void {
+    try {
+        const existingConfig = loadPersistentConfig();
+
+        const fullConfig: PersistentConfig = {
+            // User addresses
+            userAddresses: config.userAddresses || existingConfig.userAddresses || [],
+
+            // Wallet credentials
+            proxyWallet: config.proxyWallet || existingConfig.proxyWallet,
+            privateKey: config.privateKey || existingConfig.privateKey,
+
+            // API credentials
+            clobApiKey: config.clobApiKey || existingConfig.clobApiKey,
+            clobSecret: config.clobSecret || existingConfig.clobSecret,
+            clobPassPhrase: config.clobPassPhrase || existingConfig.clobPassPhrase,
+
+            // Trading settings with defaults
+            tradeMultiplier: config.tradeMultiplier || existingConfig.tradeMultiplier || 1.0,
+            maxOrderSizeUsd: config.maxOrderSizeUsd || existingConfig.maxOrderSizeUsd || 1000,
+            minOrderSizeUsd: config.minOrderSizeUsd || existingConfig.minOrderSizeUsd || 1,
+            fetchInterval: config.fetchInterval || existingConfig.fetchInterval || 1,
+            retryLimit: config.retryLimit || existingConfig.retryLimit || 3,
+            maxSlippageBps: config.maxSlippageBps || existingConfig.maxSlippageBps || 500,
+            tradeAggregationEnabled: config.tradeAggregationEnabled ?? existingConfig.tradeAggregationEnabled ?? false,
+
+            // Network settings with defaults
+            mongoUri: config.mongoUri || existingConfig.mongoUri || '',
+            rpcUrl: config.rpcUrl || existingConfig.rpcUrl || '',
+            clobHttpUrl: config.clobHttpUrl || existingConfig.clobHttpUrl || 'https://clob.polymarket.com',
+            clobWsUrl: config.clobWsUrl || existingConfig.clobWsUrl,
+            usdcContractAddress: config.usdcContractAddress || existingConfig.usdcContractAddress || '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
+
+            // API settings with defaults
+            enableApi: config.enableApi ?? existingConfig.enableApi ?? true,
+            apiPort: config.apiPort || existingConfig.apiPort || 3001,
+            apiHost: config.apiHost || existingConfig.apiHost || 'localhost',
+            jwtSecret: config.jwtSecret || existingConfig.jwtSecret || 'your-super-secret-jwt-key-change-in-production',
+            corsOrigin: config.corsOrigin || existingConfig.corsOrigin || 'http://localhost:3000',
+
+            // Bot settings with defaults
+            enableTrading: config.enableTrading ?? existingConfig.enableTrading ?? true,
+            copyStrategy: config.copyStrategy || existingConfig.copyStrategy || 'proportional',
+
+            // Metadata
+            lastUpdated: new Date().toISOString(),
+            updatedBy
+        };
+
+        fs.writeFileSync(CONFIG_FILE_PATH, JSON.stringify(fullConfig, null, 2));
+        Logger.info(`Configuration saved to ${CONFIG_FILE_PATH}`);
+    } catch (error) {
+        Logger.error(`Failed to save persistent config: ${error}`);
+        throw new Error('Failed to persist configuration');
+    }
+}
+
+function updateEnvironmentFromConfig(): void {
+    const config = loadPersistentConfig();
+
+    // Update process.env with persisted values
+    if (config.userAddresses) process.env.USER_ADDRESSES = config.userAddresses.join(',');
+    if (config.proxyWallet) process.env.PROXY_WALLET = config.proxyWallet;
+    if (config.privateKey) process.env.PRIVATE_KEY = config.privateKey;
+    if (config.clobApiKey) process.env.CLOB_API_KEY = config.clobApiKey;
+    if (config.clobSecret) process.env.CLOB_SECRET = config.clobSecret;
+    if (config.clobPassPhrase) process.env.CLOB_PASS_PHRASE = config.clobPassPhrase;
+    if (config.tradeMultiplier !== undefined) process.env.TRADE_MULTIPLIER = config.tradeMultiplier.toString();
+    if (config.maxOrderSizeUsd !== undefined) process.env.MAX_ORDER_SIZE_USD = config.maxOrderSizeUsd.toString();
+    if (config.minOrderSizeUsd !== undefined) process.env.MIN_ORDER_SIZE_USD = config.minOrderSizeUsd.toString();
+    if (config.fetchInterval !== undefined) process.env.FETCH_INTERVAL = config.fetchInterval.toString();
+    if (config.retryLimit !== undefined) process.env.RETRY_LIMIT = config.retryLimit.toString();
+    if (config.maxSlippageBps !== undefined) process.env.MAX_SLIPPAGE_BPS = config.maxSlippageBps.toString();
+    if (config.tradeAggregationEnabled !== undefined) process.env.TRADE_AGGREGATION_ENABLED = config.tradeAggregationEnabled.toString();
+    if (config.mongoUri) process.env.MONGO_URI = config.mongoUri;
+    if (config.rpcUrl) process.env.RPC_URL = config.rpcUrl;
+    if (config.clobHttpUrl) process.env.CLOB_HTTP_URL = config.clobHttpUrl;
+    if (config.clobWsUrl) process.env.CLOB_WS_URL = config.clobWsUrl;
+    if (config.usdcContractAddress) process.env.USDC_CONTRACT_ADDRESS = config.usdcContractAddress;
+    if (config.enableApi !== undefined) process.env.ENABLE_API = config.enableApi.toString();
+    if (config.apiPort !== undefined) process.env.API_PORT = config.apiPort.toString();
+    if (config.apiHost) process.env.API_HOST = config.apiHost;
+    if (config.jwtSecret) process.env.JWT_SECRET = config.jwtSecret;
+    if (config.corsOrigin) process.env.CORS_ORIGIN = config.corsOrigin;
+    if (config.enableTrading !== undefined) process.env.ENABLE_TRADING = config.enableTrading.toString();
+    if (config.copyStrategy) process.env.COPY_STRATEGY = config.copyStrategy;
+}
+
+// Load persisted configuration on startup
+updateEnvironmentFromConfig();
 
 // ============================================================================
 // Types & Interfaces
@@ -43,46 +200,6 @@ interface ApiResponse<T = any> {
     error?: string;
     timestamp: number;
 }
-
-// ============================================================================
-// Authentication Middleware
-// ============================================================================
-
-const authenticateToken = (req: AuthRequest, res: Response, next: NextFunction) => {
-    const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1]; // Bearer TOKEN
-
-    if (!token) {
-        return res.status(401).json({
-            success: false,
-            error: 'Access token required',
-            timestamp: Date.now()
-        } as ApiResponse);
-    }
-
-    jwt.verify(token, ENV.JWT_SECRET, (err: any, user: any) => {
-        if (err) {
-            return res.status(403).json({
-                success: false,
-                error: 'Invalid or expired token',
-                timestamp: Date.now()
-            } as ApiResponse);
-        }
-        req.user = user;
-        next();
-    });
-};
-
-const requireAdmin = (req: AuthRequest, res: Response, next: NextFunction) => {
-    if (req.user?.role !== 'admin') {
-        return res.status(403).json({
-            success: false,
-            error: 'Admin access required',
-            timestamp: Date.now()
-        } as ApiResponse);
-    }
-    next();
-};
 
 // ============================================================================
 // Rate Limiting
@@ -559,6 +676,572 @@ app.post('/api/reconciliation/run', authenticateToken, requireAdmin, async (req:
         res.status(500).json({
             success: false,
             error: 'Reconciliation failed',
+            timestamp: Date.now()
+        } as ApiResponse);
+    }
+});
+
+// ============================================================================
+// Configuration Management (CRUD)
+// ============================================================================
+
+/**
+ * @swagger
+ * /api/config:
+ *   get:
+ *     summary: Get current bot configuration (safe fields only)
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: Configuration retrieved successfully
+ */
+app.get('/api/config', authenticateToken, (req: AuthRequest, res: Response) => {
+    try {
+        // Load current persisted configuration
+        const persistedConfig = loadPersistentConfig();
+
+        // Return safe configuration (exclude sensitive data)
+        const safeConfig = {
+            // User addresses
+            userAddresses: persistedConfig.userAddresses || ENV.USER_ADDRESSES || [],
+
+            // Trading settings
+            tradeMultiplier: persistedConfig.tradeMultiplier || ENV.TRADE_MULTIPLIER,
+            maxOrderSizeUsd: persistedConfig.maxOrderSizeUsd || ENV.MAX_ORDER_SIZE_USD,
+            minOrderSizeUsd: persistedConfig.minOrderSizeUsd || ENV.MIN_ORDER_SIZE_USD,
+            fetchInterval: persistedConfig.fetchInterval || ENV.FETCH_INTERVAL,
+            retryLimit: persistedConfig.retryLimit || ENV.RETRY_LIMIT,
+
+            // Risk management
+            maxSlippageBps: persistedConfig.maxSlippageBps || ENV.MAX_SLIPPAGE_BPS,
+            tradeAggregationEnabled: persistedConfig.tradeAggregationEnabled ?? ENV.TRADE_AGGREGATION_ENABLED,
+
+            // API settings
+            enableApi: persistedConfig.enableApi ?? ENV.ENABLE_API,
+            apiPort: persistedConfig.apiPort || ENV.API_PORT,
+            apiHost: persistedConfig.apiHost || ENV.API_HOST,
+            corsOrigin: persistedConfig.corsOrigin || ENV.CORS_ORIGIN,
+
+            // Bot status
+            enabled: persistedConfig.enableTrading ?? ENV.ENABLE_TRADING,
+            copyStrategy: persistedConfig.copyStrategy || ENV.COPY_STRATEGY,
+
+            // Network settings
+            rpcUrl: persistedConfig.rpcUrl || ENV.RPC_URL,
+            clobHttpUrl: persistedConfig.clobHttpUrl || ENV.CLOB_HTTP_URL,
+            usdcContractAddress: persistedConfig.usdcContractAddress || ENV.USDC_CONTRACT_ADDRESS,
+
+            // Wallet info (mask sensitive data)
+            proxyWallet: persistedConfig.proxyWallet ? `${persistedConfig.proxyWallet.slice(0, 6)}...${persistedConfig.proxyWallet.slice(-4)}` : (ENV.PROXY_WALLET ? `${ENV.PROXY_WALLET.slice(0, 6)}...${ENV.PROXY_WALLET.slice(-4)}` : null),
+            hasPrivateKey: !!(persistedConfig.privateKey || ENV.PRIVATE_KEY),
+            hasApiKeys: !!(persistedConfig.clobApiKey || (ENV.CLOB_API_KEY && ENV.CLOB_SECRET && ENV.CLOB_PASS_PHRASE)),
+
+            // Metadata
+            lastUpdated: persistedConfig.lastUpdated,
+            updatedBy: persistedConfig.updatedBy
+        };
+
+        res.json({
+            success: true,
+            data: safeConfig,
+            timestamp: Date.now()
+        } as ApiResponse);
+    } catch (error) {
+        Logger.error(`Get config error: ${error}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to retrieve configuration',
+            timestamp: Date.now()
+        } as ApiResponse);
+    }
+});
+
+/**
+ * @swagger
+ * /api/config:
+ *   put:
+ *     summary: Update bot configuration (admin only)
+ *     security:
+ *       - bearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               tradeMultiplier:
+ *                 type: number
+ *               maxOrderSizeUsd:
+ *                 type: number
+ *               minOrderSizeUsd:
+ *                 type: number
+ *               fetchInterval:
+ *                 type: number
+ *               retryLimit:
+ *                 type: number
+ *               maxSlippageBps:
+ *                 type: number
+ *               tradeAggregationEnabled:
+ *                 type: boolean
+ *               enableApi:
+ *                 type: boolean
+ *               corsOrigin:
+ *                 type: string
+ *               enabled:
+ *                 type: boolean
+ *     responses:
+ *       200:
+ *         description: Configuration updated successfully
+ */
+app.put('/api/config', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+        const updates = req.body;
+
+        // Validate input
+        if (updates.tradeMultiplier !== undefined && (updates.tradeMultiplier < 0.1 || updates.tradeMultiplier > 10)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Trade multiplier must be between 0.1 and 10',
+                timestamp: Date.now()
+            });
+        }
+
+        if (updates.maxSlippageBps !== undefined && (updates.maxSlippageBps < 1 || updates.maxSlippageBps > 1000)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Max slippage must be between 1 and 1000 BPS',
+                timestamp: Date.now()
+            });
+        }
+
+        if (updates.fetchInterval !== undefined && (updates.fetchInterval < 1 || updates.fetchInterval > 60)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Fetch interval must be between 1 and 60 seconds',
+                timestamp: Date.now()
+            });
+        }
+
+        // Persist configuration changes
+        const configUpdates: Partial<PersistentConfig> = {};
+        if (updates.tradeMultiplier !== undefined) configUpdates.tradeMultiplier = updates.tradeMultiplier;
+        if (updates.maxOrderSizeUsd !== undefined) configUpdates.maxOrderSizeUsd = updates.maxOrderSizeUsd;
+        if (updates.minOrderSizeUsd !== undefined) configUpdates.minOrderSizeUsd = updates.minOrderSizeUsd;
+        if (updates.fetchInterval !== undefined) configUpdates.fetchInterval = updates.fetchInterval;
+        if (updates.retryLimit !== undefined) configUpdates.retryLimit = updates.retryLimit;
+        if (updates.maxSlippageBps !== undefined) configUpdates.maxSlippageBps = updates.maxSlippageBps;
+        if (updates.tradeAggregationEnabled !== undefined) configUpdates.tradeAggregationEnabled = updates.tradeAggregationEnabled;
+        if (updates.enableApi !== undefined) configUpdates.enableApi = updates.enableApi;
+        if (updates.corsOrigin !== undefined) configUpdates.corsOrigin = updates.corsOrigin;
+        if (updates.enabled !== undefined) configUpdates.enableTrading = updates.enabled;
+
+        savePersistentConfig(configUpdates, req.user!.address);
+
+        // Update runtime environment
+        updateEnvironmentFromConfig();
+
+        Logger.info(`Configuration updated by ${req.user?.address}`);
+
+        res.json({
+            success: true,
+            data: { message: 'Configuration updated successfully' },
+            timestamp: Date.now()
+        } as ApiResponse);
+    } catch (error) {
+        Logger.error(`Update config error: ${error}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to update configuration',
+            timestamp: Date.now()
+        } as ApiResponse);
+    }
+});
+
+/**
+ * @swagger
+ * /api/config/user-addresses:
+ *   get:
+ *     summary: Get list of trader addresses being copied
+ *   post:
+ *     summary: Add a new trader address to copy
+ *   delete:
+ *     summary: Remove a trader address
+ */
+app.get('/api/config/user-addresses', authenticateToken, (req: AuthRequest, res: Response) => {
+    try {
+        const persistedConfig = loadPersistentConfig();
+        const addresses = persistedConfig.userAddresses || ENV.USER_ADDRESSES || [];
+
+        res.json({
+            success: true,
+            data: addresses,
+            timestamp: Date.now()
+        } as ApiResponse);
+    } catch (error) {
+        Logger.error(`Get user addresses error: ${error}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to retrieve user addresses',
+            timestamp: Date.now()
+        } as ApiResponse);
+    }
+});
+
+app.post('/api/config/user-addresses', authenticateToken, requireAdmin, (req: AuthRequest, res: Response) => {
+    try {
+        const { address } = req.body;
+
+        if (!address || !address.match(/^0x[a-fA-F0-9]{40}$/)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid Ethereum address format',
+                timestamp: Date.now()
+            });
+        }
+
+        const currentAddresses = ENV.USER_ADDRESSES || [];
+
+        if (currentAddresses.includes(address.toLowerCase())) {
+            return res.status(400).json({
+                success: false,
+                error: 'Address already exists',
+                timestamp: Date.now()
+            });
+        }
+
+        currentAddresses.push(address.toLowerCase());
+
+        // Persist the updated addresses
+        savePersistentConfig({ userAddresses: currentAddresses }, req.user!.address);
+
+        // Update runtime environment
+        updateEnvironmentFromConfig();
+
+        Logger.info(`Added trader address ${address} by ${req.user?.address}`);
+
+        res.json({
+            success: true,
+            data: { message: 'Trader address added successfully', addresses: currentAddresses },
+            timestamp: Date.now()
+        } as ApiResponse);
+    } catch (error) {
+        Logger.error(`Add user address error: ${error}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to add trader address',
+            timestamp: Date.now()
+        } as ApiResponse);
+    }
+});
+
+app.delete('/api/config/user-addresses/:address', authenticateToken, requireAdmin, (req: AuthRequest, res: Response) => {
+    try {
+        const { address } = req.params;
+        const currentAddresses = ENV.USER_ADDRESSES || [];
+
+        const filteredAddresses = currentAddresses.filter(addr => addr.toLowerCase() !== address.toLowerCase());
+
+        if (filteredAddresses.length === currentAddresses.length) {
+            return res.status(404).json({
+                success: false,
+                error: 'Address not found',
+                timestamp: Date.now()
+            });
+        }
+
+        // Persist the updated addresses
+        savePersistentConfig({ userAddresses: filteredAddresses }, req.user!.address);
+
+        // Update runtime environment
+        updateEnvironmentFromConfig();
+
+        Logger.info(`Removed trader address ${address} by ${req.user?.address}`);
+
+        res.json({
+            success: true,
+            data: { message: 'Trader address removed successfully', addresses: filteredAddresses },
+            timestamp: Date.now()
+        } as ApiResponse);
+    } catch (error) {
+        Logger.error(`Remove user address error: ${error}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to remove trader address',
+            timestamp: Date.now()
+        } as ApiResponse);
+    }
+});
+
+/**
+ * @swagger
+ * /api/config/wallet:
+ *   post:
+ *     summary: Set wallet credentials (admin only)
+ *   get:
+ *     summary: Get wallet status (masked)
+ */
+app.get('/api/config/wallet', authenticateToken, (req: AuthRequest, res: Response) => {
+    try {
+        const persistedConfig = loadPersistentConfig();
+        const proxyWallet = persistedConfig.proxyWallet || ENV.PROXY_WALLET;
+        const hasPrivateKey = !!(persistedConfig.privateKey || ENV.PRIVATE_KEY);
+
+        const walletStatus = {
+            proxyWallet: proxyWallet ? `${proxyWallet.slice(0, 6)}...${proxyWallet.slice(-4)}` : null,
+            hasPrivateKey,
+            isConfigured: !!(proxyWallet && hasPrivateKey)
+        };
+
+        res.json({
+            success: true,
+            data: walletStatus,
+            timestamp: Date.now()
+        } as ApiResponse);
+    } catch (error) {
+        Logger.error(`Get wallet status error: ${error}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to get wallet status',
+            timestamp: Date.now()
+        } as ApiResponse);
+    }
+});
+
+app.post('/api/config/wallet', authenticateToken, requireAdmin, (req: AuthRequest, res: Response) => {
+    try {
+        const { proxyWallet, privateKey } = req.body;
+
+        // Validate proxy wallet address
+        if (proxyWallet && !proxyWallet.match(/^0x[a-fA-F0-9]{40}$/)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid proxy wallet address format',
+                timestamp: Date.now()
+            });
+        }
+
+        // Validate private key format (basic check)
+        if (privateKey && !privateKey.match(/^0x[a-fA-F0-9]{64}$/)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid private key format (should be 0x followed by 64 hex characters)',
+                timestamp: Date.now()
+            });
+        }
+
+        // Persist wallet credentials
+        const walletUpdates: Partial<PersistentConfig> = {};
+        if (proxyWallet) walletUpdates.proxyWallet = proxyWallet;
+        if (privateKey) walletUpdates.privateKey = privateKey;
+
+        savePersistentConfig(walletUpdates, req.user!.address);
+
+        // Update runtime environment
+        updateEnvironmentFromConfig();
+
+        Logger.info(`Wallet credentials updated by ${req.user?.address}`);
+
+        res.json({
+            success: true,
+            data: {
+                message: 'Wallet credentials updated successfully',
+                proxyWallet: proxyWallet ? `${proxyWallet.slice(0, 6)}...${proxyWallet.slice(-4)}` : null,
+                hasPrivateKey: !!privateKey
+            },
+            timestamp: Date.now()
+        } as ApiResponse);
+    } catch (error) {
+        Logger.error(`Update wallet error: ${error}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to update wallet credentials',
+            timestamp: Date.now()
+        } as ApiResponse);
+    }
+});
+
+/**
+ * @swagger
+ * /api/config/api-keys:
+ *   post:
+ *     summary: Set Polymarket API credentials (admin only)
+ *   get:
+ *     summary: Get API keys status (masked)
+ */
+app.get('/api/config/api-keys', authenticateToken, (req: AuthRequest, res: Response) => {
+    try {
+        const persistedConfig = loadPersistentConfig();
+        const hasApiKey = !!(persistedConfig.clobApiKey || ENV.CLOB_API_KEY);
+        const hasSecret = !!(persistedConfig.clobSecret || ENV.CLOB_SECRET);
+        const hasPassphrase = !!(persistedConfig.clobPassPhrase || ENV.CLOB_PASS_PHRASE);
+
+        const apiKeysStatus = {
+            hasApiKey,
+            hasSecret,
+            hasPassphrase,
+            isConfigured: hasApiKey && hasSecret && hasPassphrase
+        };
+
+        res.json({
+            success: true,
+            data: apiKeysStatus,
+            timestamp: Date.now()
+        } as ApiResponse);
+    } catch (error) {
+        Logger.error(`Get API keys status error: ${error}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to get API keys status',
+            timestamp: Date.now()
+        } as ApiResponse);
+    }
+});
+
+app.post('/api/config/api-keys', authenticateToken, requireAdmin, (req: AuthRequest, res: Response) => {
+    try {
+        const { apiKey, secret, passphrase } = req.body;
+
+        if (!apiKey || !secret || !passphrase) {
+            return res.status(400).json({
+                success: false,
+                error: 'API key, secret, and passphrase are all required',
+                timestamp: Date.now()
+            });
+        }
+
+        // Persist API credentials
+        savePersistentConfig({
+            clobApiKey: apiKey,
+            clobSecret: secret,
+            clobPassPhrase: passphrase
+        }, req.user!.address);
+
+        // Update runtime environment
+        updateEnvironmentFromConfig();
+
+        Logger.info(`Polymarket API credentials updated by ${req.user?.address}`);
+
+        res.json({
+            success: true,
+            data: {
+                message: 'API credentials updated successfully',
+                hasApiKey: !!apiKey,
+                hasSecret: !!secret,
+                hasPassphrase: !!passphrase
+            },
+            timestamp: Date.now()
+        } as ApiResponse);
+    } catch (error) {
+        Logger.error(`Update API keys error: ${error}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to update API credentials',
+            timestamp: Date.now()
+        } as ApiResponse);
+    }
+});
+
+/**
+ * @swagger
+ * /api/config/setup:
+ *   post:
+ *     summary: Complete bot setup wizard (admin only)
+ */
+app.post('/api/config/setup', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
+    try {
+        const setupData = req.body;
+
+        // Validate all required fields
+        const required = ['proxyWallet', 'privateKey', 'userAddresses', 'mongoUri', 'rpcUrl'];
+        for (const field of required) {
+            if (!setupData[field]) {
+                return res.status(400).json({
+                    success: false,
+                    error: `Missing required field: ${field}`,
+                    timestamp: Date.now()
+                });
+            }
+        }
+
+        // Validate wallet address
+        if (!setupData.proxyWallet.match(/^0x[a-fA-F0-9]{40}$/)) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid proxy wallet address',
+                timestamp: Date.now()
+            });
+        }
+
+        // Validate user addresses
+        if (!Array.isArray(setupData.userAddresses) || setupData.userAddresses.length === 0) {
+            return res.status(400).json({
+                success: false,
+                error: 'At least one trader address is required',
+                timestamp: Date.now()
+            });
+        }
+
+        for (const addr of setupData.userAddresses) {
+            if (!addr.match(/^0x[a-fA-F0-9]{40}$/)) {
+                return res.status(400).json({
+                    success: false,
+                    error: `Invalid trader address: ${addr}`,
+                    timestamp: Date.now()
+                });
+            }
+        }
+
+        // Prepare configuration for persistence
+        const setupConfig: Partial<PersistentConfig> = {
+            proxyWallet: setupData.proxyWallet,
+            privateKey: setupData.privateKey,
+            userAddresses: setupData.userAddresses,
+            mongoUri: setupData.mongoUri,
+            rpcUrl: setupData.rpcUrl,
+            clobHttpUrl: setupData.clobHttpUrl || 'https://clob.polymarket.com',
+            usdcContractAddress: setupData.usdcContractAddress || '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
+            jwtSecret: setupData.jwtSecret || ENV.JWT_SECRET,
+            enableApi: true,
+            apiPort: setupData.apiPort || 3001,
+            apiHost: setupData.apiHost || 'localhost',
+            corsOrigin: setupData.corsOrigin || 'http://localhost:3000'
+        };
+
+        // Optional fields
+        if (setupData.clobWsUrl) setupConfig.clobWsUrl = setupData.clobWsUrl;
+        if (setupData.tradeMultiplier) setupConfig.tradeMultiplier = setupData.tradeMultiplier;
+        if (setupData.maxOrderSizeUsd) setupConfig.maxOrderSizeUsd = setupData.maxOrderSizeUsd;
+        if (setupData.minOrderSizeUsd) setupConfig.minOrderSizeUsd = setupData.minOrderSizeUsd;
+        if (setupData.fetchInterval) setupConfig.fetchInterval = setupData.fetchInterval;
+        if (setupData.maxSlippageBps) setupConfig.maxSlippageBps = setupData.maxSlippageBps;
+
+        // Persist complete setup
+        savePersistentConfig(setupConfig, req.user!.address);
+
+        // Update runtime environment
+        updateEnvironmentFromConfig();
+
+        Logger.info(`Complete bot setup completed by ${req.user?.address}`);
+
+        res.json({
+            success: true,
+            data: {
+                message: 'Bot setup completed successfully',
+                nextSteps: [
+                    'Configure Polymarket API keys',
+                    'Test wallet connection',
+                    'Enable trading'
+                ]
+            },
+            timestamp: Date.now()
+        } as ApiResponse);
+    } catch (error) {
+        Logger.error(`Setup wizard error: ${error}`);
+        res.status(500).json({
+            success: false,
+            error: 'Setup failed',
             timestamp: Date.now()
         } as ApiResponse);
     }

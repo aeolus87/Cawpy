@@ -2,6 +2,18 @@ import * as dotenv from 'dotenv';
 import { CopyStrategy, CopyStrategyConfig, parseTieredMultipliers } from './copyStrategy';
 dotenv.config();
 
+const INSECURE_DEFAULT_JWT_SECRET = 'your-super-secret-jwt-key-change-in-production';
+const configuredJwtSecret = process.env.JWT_SECRET?.trim();
+const resolvedJwtSecret = configuredJwtSecret || INSECURE_DEFAULT_JWT_SECRET;
+
+if (!configuredJwtSecret || configuredJwtSecret === INSECURE_DEFAULT_JWT_SECRET) {
+    console.error('\n🚨🚨🚨 CRITICAL SECURITY WARNING 🚨🚨🚨');
+    console.error(
+        'CRITICAL: JWT_SECRET is not set or is using the insecure default. Authentication is compromised. Set a strong JWT_SECRET environment variable immediately.'
+    );
+    console.error('🚨🚨🚨 CRITICAL SECURITY WARNING 🚨🚨🚨\n');
+}
+
 /**
  * Validate Ethereum address format
  */
@@ -20,11 +32,6 @@ const validateRequiredEnv = (): void => {
         'CLOB_WS_URL',         // WebSocket endpoint
         'USDC_CONTRACT_ADDRESS', // USDC contract address
     ];
-
-    // API-specific variables
-    if (process.env.ENABLE_API === 'true') {
-        infrastructure.push('JWT_SECRET');
-    }
 
     // For web-based deployments, user config can be set via API
     // These are now optional and can be configured through the frontend
@@ -53,9 +60,6 @@ const validateRequiredEnv = (): void => {
         console.error('   - CLOB_HTTP_URL: Polymarket API endpoint');
         console.error('   - CLOB_WS_URL: Polymarket WebSocket endpoint');
         console.error('   - USDC_CONTRACT_ADDRESS: USDC contract address');
-        if (process.env.ENABLE_API === 'true') {
-            console.error('   - JWT_SECRET: JWT secret for API authentication');
-        }
         console.error('\n💡 User configuration (traders, wallet, etc.) can be set via web interface\n');
         console.error('📖 See docs/QUICK_START.md for detailed instructions\n');
         throw new Error(`Missing required infrastructure variables: ${missing.join(', ')}`);
@@ -417,7 +421,7 @@ export const ENV = {
     // API server settings
     API_PORT: parseInt(process.env.API_PORT || '3001', 10),
     API_HOST: process.env.API_HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : 'localhost'),
-    JWT_SECRET: process.env.JWT_SECRET || 'your-super-secret-jwt-key-change-in-production',
+    JWT_SECRET: resolvedJwtSecret,
     API_RATE_LIMIT_WINDOW_MS: parseInt(process.env.API_RATE_LIMIT_WINDOW_MS || '900000', 10), // 15 minutes
     API_RATE_LIMIT_MAX_REQUESTS: parseInt(process.env.API_RATE_LIMIT_MAX_REQUESTS || '100', 10),
     CORS_ORIGIN: process.env.CORS_ORIGIN || 'http://localhost:3000',

@@ -1,5 +1,6 @@
 import connectDB, { closeDB } from './config/db';
 import { ENV } from './config/env';
+import { startTrading, stopTrading } from './services/runtimeManager';
 import Logger from './utils/logger';
 
 const USER_ADDRESSES = ENV.USER_ADDRESSES;
@@ -19,15 +20,9 @@ const gracefulShutdown = async (signal: string) => {
     Logger.info(`Received ${signal}, initiating graceful shutdown...`);
 
     try {
-        // Conditionally stop trading services if they were started
-        try {
-            const { stopTradeMonitor } = await import('./services/tradeMonitor');
-            const { stopTradeExecutor } = await import('./services/tradeExecutor');
-            stopTradeMonitor();
-            stopTradeExecutor();
-        } catch (error) {
-            // Trading services may not have been started in API-only mode
-            Logger.info('Trading services not running (API-only mode)');
+        const stopResult = stopTrading();
+        if (!stopResult.success && stopResult.error !== 'Not running') {
+            Logger.warning(`Trading stop request returned: ${stopResult.error}`);
         }
 
         // Give services time to finish current operations
@@ -97,18 +92,15 @@ export const main = async () => {
             // Start API server only
             Logger.info('Starting API server...');
             await import('./server/api');
+            return;
         }
 
-        // Full trading bot mode - dynamically import trading services
+        // Full trading bot mode
         console.log(`\n${colors.green}🤖 Full Trading Bot Mode${colors.reset}`);
         console.log(`   Traders to copy: ${USER_ADDRESSES.length}`);
         console.log(`   Wallet: ${PROXY_WALLET ? PROXY_WALLET.slice(0, 6) + '...' + PROXY_WALLET.slice(-4) : 'Not set'}`);
         console.log(`   Run health check: ${colors.cyan}npm run health-check${colors.reset}\n`);
 
-        // Dynamically import trading services only when needed
-        const { default: createClobClient } = await import('./utils/createClobClient');
-        const { default: tradeExecutor, stopTradeExecutor } = await import('./services/tradeExecutor');
-        const { default: tradeMonitor, stopTradeMonitor } = await import('./services/tradeMonitor');
         const { performHealthCheck, logHealthCheck } = await import('./utils/healthCheck');
 
         Logger.startup(USER_ADDRESSES, PROXY_WALLET);
@@ -122,16 +114,10 @@ export const main = async () => {
             Logger.warning('Health check failed, but continuing startup...');
         }
 
-        Logger.info('Initializing CLOB client...');
-        const clobClient = await createClobClient();
-        Logger.success('CLOB client ready');
-
-        Logger.separator();
-        Logger.info('Starting trade monitor...');
-        tradeMonitor();
-
-        Logger.info('Starting trade executor...');
-        tradeExecutor(clobClient);
+        const startResult = await startTrading('boot');
+        if (!startResult.success) {
+            Logger.error(`Trading runtime failed to start in boot mode: ${startResult.error}`);
+        }
 
         // Start API server if enabled
         if (process.env.ENABLE_API === 'true') {

@@ -16,6 +16,7 @@ import mongoose from 'mongoose';
 import { ENV } from '../config/env';
 import connectDB from '../config/db';
 import Logger from '../utils/logger';
+import { getTradingStatus, startTrading, stopTrading } from '../services/runtimeManager';
 
 // NOTE: Trading services (tradeExecutor, tradeMonitor, reconciliation) are
 // loaded dynamically via await import() inside their endpoints to prevent
@@ -676,14 +677,10 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
  *         description: Trading status
  */
 app.get('/api/trading/status', authenticateToken, (req: AuthRequest, res: Response) => {
-    // TODO: Implement actual status tracking
+    const status = getTradingStatus();
     res.json({
         success: true,
-        data: {
-            isRunning: true, // Placeholder
-            uptime: process.uptime(),
-            lastActivity: new Date().toISOString()
-        },
+        data: status,
         timestamp: Date.now()
     } as ApiResponse);
 });
@@ -699,8 +696,16 @@ app.get('/api/trading/status', authenticateToken, (req: AuthRequest, res: Respon
  */
 app.post('/api/trading/start', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
     try {
-        // TODO: Implement bot start logic
-        Logger.info('Trading bot started via API');
+        const result = await startTrading(`api:${getRequesterIdentity(req)}`);
+        if (!result.success) {
+            return res.status(400).json({
+                success: false,
+                error: result.error || 'Failed to start trading',
+                timestamp: Date.now()
+            } as ApiResponse);
+        }
+
+        Logger.info(`Trading bot start requested via API by ${getRequesterIdentity(req)}`);
 
         res.json({
             success: true,
@@ -728,13 +733,16 @@ app.post('/api/trading/start', authenticateToken, requireAdmin, async (req: Auth
  */
 app.post('/api/trading/stop', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
     try {
-        // Dynamically import trading services only when needed
-        const { stopTradeExecutor } = await import('../services/tradeExecutor');
-        const { stopTradeMonitor } = await import('../services/tradeMonitor');
-        stopTradeExecutor();
-        stopTradeMonitor();
+        const result = stopTrading();
+        if (!result.success) {
+            return res.status(400).json({
+                success: false,
+                error: result.error || 'Failed to stop trading',
+                timestamp: Date.now()
+            } as ApiResponse);
+        }
 
-        Logger.info('Trading bot stopped via API');
+        Logger.info(`Trading bot stop requested via API by ${getRequesterIdentity(req)}`);
 
         res.json({
             success: true,

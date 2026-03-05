@@ -63,7 +63,6 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
         });
     }
 
-    // Try to verify token with Polycopy's JWT secret
     try {
         const decoded = jwt.verify(token, ENV.JWT_SECRET) as any;
 
@@ -76,39 +75,17 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
             permissions: decoded.permissions || []
         };
         next();
-    } catch (polycopyError) {
-        // If Polycopy verification fails, try Moniqo token validation
-        try {
-            // For Moniqo integration, accept tokens signed with different secrets
-            // or with different structures. You may need to adjust this based on Moniqo's token format
-            const decoded = jwt.decode(token) as any;
-
-            // Accept Moniqo tokens if they have required fields
-            if (decoded && (decoded.moniqoId || decoded.userId || decoded.sub)) {
-                req.user = {
-                    moniqoId: resolveMoniqoId(decoded),
-                    email: decoded.email,
-                    address: resolveAddress(decoded),
-                    role: resolveRole(decoded),
-                    permissions: decoded.permissions || []
-                };
-                next();
-            } else {
-                throw new Error('Invalid token structure');
-            }
-        } catch (moniqoError) {
-            return res.status(403).json({
-                success: false,
-                error: 'Invalid or expired token',
-                timestamp: Date.now()
-            });
-        }
+    } catch (error) {
+        return res.status(403).json({
+            success: false,
+            error: 'Invalid or expired token',
+            timestamp: Date.now()
+        });
     }
 }
 
 export function requireAdmin(req: AuthRequest, res: Response, next: NextFunction) {
-    // Moniqo-integrated users are treated as privileged operators in this deployment.
-    if (req.user?.role !== 'admin' && !req.user?.moniqoId) {
+    if (req.user?.role !== 'admin') {
         return res.status(403).json({
             success: false,
             error: 'Admin access required',

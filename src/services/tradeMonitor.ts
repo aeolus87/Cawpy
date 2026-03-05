@@ -1,13 +1,21 @@
-import { ENV } from '../config/env';
+import { getConfig } from '../config/configProvider';
 import { getUserActivityModel, getUserPositionModel } from '../models/userHistory';
 import fetchData from '../utils/fetchData';
 import Logger from '../utils/logger';
 
-const TOO_OLD_TIMESTAMP_HOURS = ENV.TOO_OLD_TIMESTAMP_HOURS;
-const FETCH_INTERVAL = ENV.FETCH_INTERVAL;
+const getTooOldTimestampHours = (): number => getConfig().TOO_OLD_TIMESTAMP_HOURS;
+const getFetchInterval = (): number => getConfig().FETCH_INTERVAL;
+
+const getProxyWallet = (): string => {
+    const wallet = getConfig().PROXY_WALLET;
+    if (!wallet) {
+        throw new Error('PROXY_WALLET is not defined');
+    }
+    return wallet;
+};
 
 const getMinTimestampMs = (): number => {
-    return Date.now() - TOO_OLD_TIMESTAMP_HOURS * 60 * 60 * 1000;
+    return Date.now() - getTooOldTimestampHours() * 60 * 60 * 1000;
 };
 
 const isTradeTimestampValid = (timestamp: number): boolean => {
@@ -21,30 +29,42 @@ let userModels: Array<{
     UserActivity: any;
     UserPosition: any;
 }> | null = null;
+let userModelSignature = '';
+
+const buildAddressSignature = (addresses: string[]): string => addresses.join(',');
+
+export const resetUserModels = () => {
+    userModels = null;
+    userModelSignature = '';
+};
 
 const getUserModels = () => {
-    if (!userModels) {
-        const USER_ADDRESSES = ENV.USER_ADDRESSES;
-        if (!USER_ADDRESSES || USER_ADDRESSES.length === 0) {
-            throw new Error('USER_ADDRESSES is not defined or empty');
-        }
-        userModels = USER_ADDRESSES.map((address) => ({
+    const userAddresses = getConfig().USER_ADDRESSES;
+    if (!userAddresses || userAddresses.length === 0) {
+        throw new Error('USER_ADDRESSES is not defined or empty');
+    }
+
+    const signature = buildAddressSignature(userAddresses);
+    if (!userModels || signature !== userModelSignature) {
+        userModelSignature = signature;
+        userModels = userAddresses.map((address) => ({
             address,
             UserActivity: getUserActivityModel(address),
             UserPosition: getUserPositionModel(address),
         }));
     }
+
     return userModels;
 };
 
 const init = async () => {
     const counts: number[] = [];
-    for (const { address, UserActivity } of getUserModels()) {
+    for (const { UserActivity } of getUserModels()) {
         const count = await UserActivity.countDocuments();
         counts.push(count);
     }
     Logger.clearLine();
-    const userAddresses = ENV.USER_ADDRESSES;
+    const userAddresses = getConfig().USER_ADDRESSES;
     if (!userAddresses || userAddresses.length === 0) {
         throw new Error('USER_ADDRESSES is not defined or empty');
     }
@@ -52,12 +72,13 @@ const init = async () => {
 
     // Show your own positions first
     try {
-        const myPositionsUrl = `https://data-api.polymarket.com/positions?user=${ENV.PROXY_WALLET}`;
+        const proxyWallet = getProxyWallet();
+        const myPositionsUrl = `https://data-api.polymarket.com/positions?user=${proxyWallet}`;
         const myPositions = await fetchData(myPositionsUrl);
 
         // Get current USDC balance
         const getMyBalance = (await import('../utils/getMyBalance')).default;
-        const currentBalance = await getMyBalance(ENV.PROXY_WALLET);
+        const currentBalance = await getMyBalance(proxyWallet);
 
         if (Array.isArray(myPositions) && myPositions.length > 0) {
             // Calculate your overall profitability and initial investment
@@ -81,7 +102,7 @@ const init = async () => {
 
             Logger.clearLine();
             Logger.myPositions(
-                ENV.PROXY_WALLET,
+                proxyWallet,
                 myPositions.length,
                 myTopPositions,
                 myOverallPnl,
@@ -91,7 +112,7 @@ const init = async () => {
             );
         } else {
             Logger.clearLine();
-            Logger.myPositions(ENV.PROXY_WALLET, 0, [], 0, 0, 0, currentBalance);
+            Logger.myPositions(proxyWallet, 0, [], 0, 0, 0, currentBalance);
         }
     } catch (error) {
         Logger.error(`Failed to fetch your positions: ${error}`);
@@ -101,7 +122,7 @@ const init = async () => {
     const positionCounts: number[] = [];
     const positionDetails: any[][] = [];
     const profitabilities: number[] = [];
-    for (const { address, UserPosition } of getUserModels()) {
+    for (const { UserPosition } of getUserModels()) {
         const positions = await UserPosition.find().exec();
         positionCounts.push(positions.length);
 
@@ -125,7 +146,7 @@ const init = async () => {
         positionDetails.push(topPositions);
     }
     Logger.clearLine();
-    const traderAddresses = ENV.USER_ADDRESSES;
+    const traderAddresses = getConfig().USER_ADDRESSES;
     if (!traderAddresses || traderAddresses.length === 0) {
         throw new Error('USER_ADDRESSES is not defined or empty');
     }
@@ -253,11 +274,11 @@ export const stopTradeMonitor = () => {
 
 const tradeMonitor = async () => {
     await init();
-        const userAddresses = ENV.USER_ADDRESSES;
-        if (!userAddresses || userAddresses.length === 0) {
-            throw new Error('USER_ADDRESSES is not defined or empty');
-        }
-        Logger.success(`Monitoring ${userAddresses.length} trader(s) every ${FETCH_INTERVAL}s`);
+    const userAddresses = getConfig().USER_ADDRESSES;
+    if (!userAddresses || userAddresses.length === 0) {
+        throw new Error('USER_ADDRESSES is not defined or empty');
+    }
+    Logger.success(`Monitoring ${userAddresses.length} trader(s) every ${getFetchInterval()}s`);
     Logger.separator();
 
     // On first run, mark all existing historical trades as already processed
@@ -282,7 +303,7 @@ const tradeMonitor = async () => {
     while (isRunning) {
         await fetchTradeData();
         if (!isRunning) break;
-        await new Promise((resolve) => setTimeout(resolve, FETCH_INTERVAL * 1000));
+        await new Promise((resolve) => setTimeout(resolve, getFetchInterval() * 1000));
     }
 
     Logger.info('Trade monitor stopped');

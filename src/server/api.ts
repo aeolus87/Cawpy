@@ -14,9 +14,15 @@ import * as swaggerUi from 'swagger-ui-express';
 import * as jwt from 'jsonwebtoken';
 import mongoose from 'mongoose';
 import { ENV } from '../config/env';
+import { getConfig, updateConfig as updateRuntimeConfig, type RuntimeConfig } from '../config/configProvider';
 import connectDB from '../config/db';
 import Logger from '../utils/logger';
-import { getTradingStatus, startTrading, stopTrading } from '../services/runtimeManager';
+import { getActiveTenantId, getTradingStatus, startTrading, stopTrading } from '../services/runtimeManager';
+import {
+    loadPersistedConfig,
+    savePersistedConfig,
+    type PersistentConfig,
+} from '../models/botConfig';
 
 // NOTE: Trading services (tradeExecutor, tradeMonitor, reconciliation) are
 // loaded dynamically via await import() inside their endpoints to prevent
@@ -25,6 +31,7 @@ import { getTradingStatus, startTrading, stopTrading } from '../services/runtime
 // Import utilities
 import fetchData from '../utils/fetchData';
 import { authenticateToken, requireAdmin, AuthRequest } from '../utils/auth.middleware';
+import { resolveTenantId } from '../utils/tenantResolver';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -32,140 +39,45 @@ import * as path from 'path';
 // Configuration Persistence
 // ============================================================================
 
-const CONFIG_FILE_PATH = path.join(process.cwd(), 'config.json');
 const LOGS_DIR_PATH = path.join(process.cwd(), 'logs');
 const ETH_ADDRESS_REGEX = /^0x[a-fA-F0-9]{40}$/;
 
 let dbConnectionAttempt: Promise<boolean> | null = null;
 
-interface PersistentConfig {
-    // User identification
-    moniqoId?: string;
-    email?: string;
-    role?: string;
+const toRuntimeConfigUpdates = (config: Partial<PersistentConfig>): Partial<RuntimeConfig> => {
+    const updates: Partial<RuntimeConfig> = {};
 
-    // User addresses
-    userAddresses?: string[];
-
-    // Wallet credentials (encrypted in production)
-    proxyWallet?: string;
-    privateKey?: string;
-
-    // API credentials
-    clobApiKey?: string;
-    clobSecret?: string;
-    clobPassPhrase?: string;
-
-    // Trading settings
-    tradeMultiplier?: number;
-    maxOrderSizeUsd?: number;
-    minOrderSizeUsd?: number;
-    fetchInterval?: number;
-    retryLimit?: number;
-    maxSlippageBps?: number;
-    tradeAggregationEnabled?: boolean;
-
-    // Network settings
-    mongoUri?: string;
-    rpcUrl?: string;
-    clobHttpUrl?: string;
-    clobWsUrl?: string;
-    usdcContractAddress?: string;
-
-    // API settings
-    enableApi?: boolean;
-    apiPort?: number;
-    apiHost?: string;
-    jwtSecret?: string;
-    corsOrigin?: string;
-
-    // Bot settings
-    enableTrading?: boolean;
-    copyStrategy?: string;
-
-    // Metadata
-    lastUpdated: string;
-    updatedBy: string;
-}
-
-function loadPersistentConfig(): Partial<PersistentConfig> {
-    try {
-        if (fs.existsSync(CONFIG_FILE_PATH)) {
-            const configData = fs.readFileSync(CONFIG_FILE_PATH, 'utf8');
-            return JSON.parse(configData);
-        }
-    } catch (error) {
-        Logger.error(`Failed to load persistent config: ${error}`);
+    if (config.userAddresses) updates.USER_ADDRESSES = config.userAddresses;
+    if (config.proxyWallet) updates.PROXY_WALLET = config.proxyWallet;
+    if (config.privateKey) updates.PRIVATE_KEY = config.privateKey;
+    if (config.tradeMultiplier !== undefined) updates.TRADE_MULTIPLIER = config.tradeMultiplier;
+    if (config.maxOrderSizeUsd !== undefined) updates.MAX_ORDER_SIZE_USD = config.maxOrderSizeUsd;
+    if (config.minOrderSizeUsd !== undefined) updates.MIN_ORDER_SIZE_USD = config.minOrderSizeUsd;
+    if (config.fetchInterval !== undefined) updates.FETCH_INTERVAL = config.fetchInterval;
+    if (config.retryLimit !== undefined) updates.RETRY_LIMIT = config.retryLimit;
+    if (config.maxSlippageBps !== undefined) updates.MAX_SLIPPAGE_BPS = config.maxSlippageBps;
+    if (config.tooOldTimestampHours !== undefined) {
+        updates.TOO_OLD_TIMESTAMP_HOURS = config.tooOldTimestampHours;
     }
-    return {};
-}
-
-function savePersistentConfig(config: Partial<PersistentConfig>, updatedBy: string): void {
-    try {
-        const existingConfig = loadPersistentConfig();
-
-        const fullConfig: PersistentConfig = {
-            // User identification
-            moniqoId: config.moniqoId || existingConfig.moniqoId,
-            email: config.email || existingConfig.email,
-            role: config.role || existingConfig.role || 'user',
-
-            // User addresses
-            userAddresses: config.userAddresses || existingConfig.userAddresses || [],
-
-            // Wallet credentials
-            proxyWallet: config.proxyWallet || existingConfig.proxyWallet,
-            privateKey: config.privateKey || existingConfig.privateKey,
-
-            // API credentials
-            clobApiKey: config.clobApiKey || existingConfig.clobApiKey,
-            clobSecret: config.clobSecret || existingConfig.clobSecret,
-            clobPassPhrase: config.clobPassPhrase || existingConfig.clobPassPhrase,
-
-            // Trading settings with defaults
-            tradeMultiplier: config.tradeMultiplier || existingConfig.tradeMultiplier || 1.0,
-            maxOrderSizeUsd: config.maxOrderSizeUsd || existingConfig.maxOrderSizeUsd || 1000,
-            minOrderSizeUsd: config.minOrderSizeUsd || existingConfig.minOrderSizeUsd || 1,
-            fetchInterval: config.fetchInterval || existingConfig.fetchInterval || 1,
-            retryLimit: config.retryLimit || existingConfig.retryLimit || 3,
-            maxSlippageBps: config.maxSlippageBps || existingConfig.maxSlippageBps || 500,
-            tradeAggregationEnabled: config.tradeAggregationEnabled ?? existingConfig.tradeAggregationEnabled ?? false,
-
-            // Network settings with defaults
-            mongoUri: config.mongoUri || existingConfig.mongoUri || '',
-            rpcUrl: config.rpcUrl || existingConfig.rpcUrl || '',
-            clobHttpUrl: config.clobHttpUrl || existingConfig.clobHttpUrl || 'https://clob.polymarket.com',
-            clobWsUrl: config.clobWsUrl || existingConfig.clobWsUrl,
-            usdcContractAddress: config.usdcContractAddress || existingConfig.usdcContractAddress || '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
-
-            // API settings with defaults
-            enableApi: config.enableApi ?? existingConfig.enableApi ?? true,
-            apiPort: config.apiPort || existingConfig.apiPort || 3001,
-            apiHost: config.apiHost || existingConfig.apiHost || 'localhost',
-            jwtSecret: config.jwtSecret || existingConfig.jwtSecret || 'your-super-secret-jwt-key-change-in-production',
-            corsOrigin: config.corsOrigin || existingConfig.corsOrigin || 'http://localhost:3000',
-
-            // Bot settings with defaults
-            enableTrading: config.enableTrading ?? existingConfig.enableTrading ?? true,
-            copyStrategy: config.copyStrategy || existingConfig.copyStrategy || 'proportional',
-
-            // Metadata
-            lastUpdated: new Date().toISOString(),
-            updatedBy
-        };
-
-        fs.writeFileSync(CONFIG_FILE_PATH, JSON.stringify(fullConfig, null, 2));
-        Logger.info(`Configuration saved to ${CONFIG_FILE_PATH}`);
-    } catch (error) {
-        Logger.error(`Failed to save persistent config: ${error}`);
-        throw new Error('Failed to persist configuration');
+    if (config.tradeAggregationEnabled !== undefined) {
+        updates.TRADE_AGGREGATION_ENABLED = config.tradeAggregationEnabled;
     }
-}
+    if (config.tradeAggregationWindowSeconds !== undefined) {
+        updates.TRADE_AGGREGATION_WINDOW_SECONDS = config.tradeAggregationWindowSeconds;
+    }
+    if (config.enableTrading !== undefined) updates.ENABLE_TRADING = config.enableTrading;
+    if (config.copyStrategy) updates.COPY_STRATEGY = config.copyStrategy;
+    if (config.mongoUri) updates.MONGO_URI = config.mongoUri;
+    if (config.rpcUrl) updates.RPC_URL = config.rpcUrl;
+    if (config.clobHttpUrl) updates.CLOB_HTTP_URL = config.clobHttpUrl;
+    if (config.clobApiKey) updates.CLOB_API_KEY = config.clobApiKey;
+    if (config.clobSecret) updates.CLOB_SECRET = config.clobSecret;
+    if (config.clobPassPhrase) updates.CLOB_PASS_PHRASE = config.clobPassPhrase;
 
-function updateEnvironmentFromConfig(): void {
-    const config = loadPersistentConfig();
+    return updates;
+};
 
-    // Update process.env with persisted values
+const updateProcessEnvFromConfig = (config: Partial<PersistentConfig>): void => {
     if (config.userAddresses) process.env.USER_ADDRESSES = config.userAddresses.join(',');
     if (config.proxyWallet) process.env.PROXY_WALLET = config.proxyWallet;
     if (config.privateKey) process.env.PRIVATE_KEY = config.privateKey;
@@ -178,7 +90,15 @@ function updateEnvironmentFromConfig(): void {
     if (config.fetchInterval !== undefined) process.env.FETCH_INTERVAL = config.fetchInterval.toString();
     if (config.retryLimit !== undefined) process.env.RETRY_LIMIT = config.retryLimit.toString();
     if (config.maxSlippageBps !== undefined) process.env.MAX_SLIPPAGE_BPS = config.maxSlippageBps.toString();
-    if (config.tradeAggregationEnabled !== undefined) process.env.TRADE_AGGREGATION_ENABLED = config.tradeAggregationEnabled.toString();
+    if (config.tooOldTimestampHours !== undefined) {
+        process.env.TOO_OLD_TIMESTAMP_HOURS = config.tooOldTimestampHours.toString();
+    }
+    if (config.tradeAggregationEnabled !== undefined) {
+        process.env.TRADE_AGGREGATION_ENABLED = config.tradeAggregationEnabled.toString();
+    }
+    if (config.tradeAggregationWindowSeconds !== undefined) {
+        process.env.TRADE_AGGREGATION_WINDOW_SECONDS = config.tradeAggregationWindowSeconds.toString();
+    }
     if (config.mongoUri) process.env.MONGO_URI = config.mongoUri;
     if (config.rpcUrl) process.env.RPC_URL = config.rpcUrl;
     if (config.clobHttpUrl) process.env.CLOB_HTTP_URL = config.clobHttpUrl;
@@ -191,10 +111,31 @@ function updateEnvironmentFromConfig(): void {
     if (config.corsOrigin) process.env.CORS_ORIGIN = config.corsOrigin;
     if (config.enableTrading !== undefined) process.env.ENABLE_TRADING = config.enableTrading.toString();
     if (config.copyStrategy) process.env.COPY_STRATEGY = config.copyStrategy;
-}
+};
 
-// Load persisted configuration on startup
-updateEnvironmentFromConfig();
+const updateEnvironmentFromConfig = async (
+    tenantId: string,
+    overrides: Partial<PersistentConfig> = {}
+): Promise<Partial<PersistentConfig>> => {
+    const normalizedTenantId = tenantId.trim();
+    if (!normalizedTenantId) {
+        return {};
+    }
+
+    const persistedConfig = await loadPersistedConfig(normalizedTenantId);
+    const mergedConfig = { ...persistedConfig, ...overrides };
+
+    if (getActiveTenantId() === normalizedTenantId) {
+        updateProcessEnvFromConfig(mergedConfig);
+
+        const runtimeUpdates = toRuntimeConfigUpdates(mergedConfig);
+        if (Object.keys(runtimeUpdates).length > 0) {
+            updateRuntimeConfig(runtimeUpdates);
+        }
+    }
+
+    return mergedConfig;
+};
 
 // ============================================================================
 // Types & Interfaces
@@ -247,8 +188,8 @@ const getRequesterIdentity = (req: AuthRequest): string => {
     return 'unknown';
 };
 
-const getConfiguredUserAddresses = (): string[] => {
-    const persistedConfig = loadPersistentConfig();
+const getConfiguredUserAddresses = async (tenantId: string): Promise<string[]> => {
+    const persistedConfig = await loadPersistedConfig(tenantId);
 
     const persistedAddresses = Array.isArray(persistedConfig.userAddresses)
         ? persistedConfig.userAddresses
@@ -260,13 +201,31 @@ const getConfiguredUserAddresses = (): string[] => {
         return Array.from(new Set(persistedAddresses));
     }
 
-    return Array.from(
-        new Set(
-            (ENV.USER_ADDRESSES || [])
-                .map((address) => normalizeAddress(address))
-                .filter((address): address is string => !!address)
-        )
-    );
+    if (getActiveTenantId() === tenantId) {
+        return Array.from(
+            new Set(
+                (getConfig().USER_ADDRESSES || [])
+                    .map((address) => normalizeAddress(address))
+                    .filter((address): address is string => !!address)
+            )
+        );
+    }
+
+    return [];
+};
+
+const resolveRequestTenantId = (req: AuthRequest, res: Response): string | null => {
+    const tenantId = resolveTenantId(req.user);
+    if (tenantId) {
+        return tenantId;
+    }
+
+    res.status(400).json({
+        success: false,
+        error: 'Unable to resolve user identity',
+        timestamp: Date.now(),
+    } as ApiResponse);
+    return null;
 };
 
 const waitForDbConnection = async (timeoutMs = 5000): Promise<boolean> => {
@@ -590,48 +549,47 @@ app.get('/health', (req: Request, res: Response) => {
 app.post('/api/auth/login', async (req: Request, res: Response) => {
     try {
         const { address, signature, moniqoToken, moniqoId, email } = req.body;
-        const persistedConfig = loadPersistentConfig();
+        const normalizedAddress = normalizeAddress(address);
+        const tenantId = resolveTenantId({
+            moniqoId: typeof moniqoId === 'string' ? moniqoId : undefined,
+            address: normalizedAddress || (typeof address === 'string' ? address : undefined),
+        } as AuthRequest['user']);
 
-        let userData: any = {};
+        if (!tenantId) {
+            return res.status(400).json({
+                success: false,
+                error: 'Unable to resolve user identity',
+                timestamp: Date.now(),
+            } as ApiResponse);
+        }
+
+        const persistedConfig = await loadPersistedConfig(tenantId);
+        const hasTenantConfig = Object.keys(persistedConfig).length > 0;
+        const persistedRole =
+            typeof persistedConfig.role === 'string' && persistedConfig.role.trim().length > 0
+                ? persistedConfig.role.trim()
+                : null;
+        const resolvedRole = persistedRole || (hasTenantConfig ? 'user' : 'admin');
+
+        let userData: Record<string, unknown> = {};
 
         // Method 1: Traditional wallet signature (for direct Polycopy users)
         if (address && signature) {
             // TODO: Implement proper wallet signature verification
             // For now, accept any address
             userData = {
-                address: address.toLowerCase(),
-                role: 'user' // Default role, can be upgraded to admin
+                address: normalizedAddress || String(address).toLowerCase(),
+                role: resolvedRole,
             };
         }
         // Method 2: Moniqo token exchange (for Moniqo-integrated users)
         else if (moniqoToken || moniqoId) {
-            const normalizedMoniqoId = typeof moniqoId === 'string' ? moniqoId.trim() : '';
-            const persistedMoniqoId =
-                typeof persistedConfig.moniqoId === 'string' ? persistedConfig.moniqoId.trim() : '';
-            const shouldBootstrapAdmin = !persistedMoniqoId && !persistedConfig.role;
-            const persistedAdminForCurrentUser =
-                persistedConfig.role === 'admin' &&
-                !!normalizedMoniqoId &&
-                normalizedMoniqoId === persistedMoniqoId;
-            const resolvedRole = shouldBootstrapAdmin || persistedAdminForCurrentUser ? 'admin' : 'user';
-
-            if (shouldBootstrapAdmin && normalizedMoniqoId) {
-                savePersistentConfig(
-                    {
-                        moniqoId: normalizedMoniqoId,
-                        email,
-                        role: 'admin'
-                    },
-                    `auth-bootstrap-${normalizedMoniqoId}`
-                );
-            }
-
             // Accept Moniqo authentication
             userData = {
                 moniqoId: moniqoId,
                 email: email,
-                address: address, // Optional wallet address from Moniqo
-                role: resolvedRole
+                address: normalizedAddress || address, // Optional wallet address from Moniqo
+                role: resolvedRole,
             };
         } else {
             return res.status(400).json({
@@ -639,6 +597,24 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
                 error: 'Either wallet signature (address + signature) or Moniqo token required',
                 timestamp: Date.now()
             });
+        }
+
+        if (!hasTenantConfig) {
+            const bootstrapConfig: Partial<PersistentConfig> = {
+                role: 'admin',
+            };
+
+            const normalizedMoniqoId = typeof moniqoId === 'string' ? moniqoId.trim() : '';
+            if (normalizedMoniqoId) {
+                bootstrapConfig.moniqoId = normalizedMoniqoId;
+            }
+            if (typeof email === 'string' && email.trim().length > 0) {
+                bootstrapConfig.email = email.trim();
+            }
+
+            await savePersistedConfig(tenantId, bootstrapConfig, `auth-bootstrap-${tenantId}`);
+            await updateEnvironmentFromConfig(tenantId, bootstrapConfig);
+            userData.role = 'admin';
         }
 
         // Generate Polycopy JWT token
@@ -680,7 +656,10 @@ app.get('/api/trading/status', authenticateToken, (req: AuthRequest, res: Respon
     const status = getTradingStatus();
     res.json({
         success: true,
-        data: status,
+        data: {
+            ...status,
+            activeTenantId: status.activeTenantId ?? null,
+        },
         timestamp: Date.now()
     } as ApiResponse);
 });
@@ -696,11 +675,18 @@ app.get('/api/trading/status', authenticateToken, (req: AuthRequest, res: Respon
  */
 app.post('/api/trading/start', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
     try {
-        const result = await startTrading(`api:${getRequesterIdentity(req)}`);
+        const tenantId = resolveRequestTenantId(req, res);
+        if (!tenantId) return;
+
+        const result = await startTrading(`api:${getRequesterIdentity(req)}`, tenantId);
         if (!result.success) {
+            const mappedError =
+                result.error === 'Trading bot is currently running for another user'
+                    ? 'Trading bot is currently running for another user. Stop it first.'
+                    : result.error || 'Failed to start trading';
             return res.status(400).json({
                 success: false,
-                error: result.error || 'Failed to start trading',
+                error: mappedError,
                 timestamp: Date.now()
             } as ApiResponse);
         }
@@ -731,8 +717,26 @@ app.post('/api/trading/start', authenticateToken, requireAdmin, async (req: Auth
  *       200:
  *         description: Bot stopped successfully
  */
-app.post('/api/trading/stop', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
+app.post('/api/trading/stop', authenticateToken, async (req: AuthRequest, res: Response) => {
     try {
+        const tenantId = resolveRequestTenantId(req, res);
+        if (!tenantId) return;
+
+        const status = getTradingStatus();
+        const isAdmin = req.user?.role === 'admin';
+        if (
+            status.isRunning &&
+            status.activeTenantId &&
+            status.activeTenantId !== tenantId &&
+            !isAdmin
+        ) {
+            return res.status(403).json({
+                success: false,
+                error: 'Only the user who started trading or an admin can stop it.',
+                timestamp: Date.now(),
+            } as ApiResponse);
+        }
+
         const result = stopTrading();
         if (!result.success) {
             return res.status(400).json({
@@ -774,7 +778,14 @@ app.post('/api/trading/stop', authenticateToken, requireAdmin, async (req: AuthR
  */
 app.get('/api/positions', authenticateToken, async (req: AuthRequest, res: Response) => {
     try {
-        const wallet = ENV.PROXY_WALLET;
+        const tenantId = resolveRequestTenantId(req, res);
+        if (!tenantId) return;
+
+        const persistedConfig = await loadPersistedConfig(tenantId);
+        const wallet =
+            persistedConfig.proxyWallet ||
+            (getActiveTenantId() === tenantId ? getConfig().PROXY_WALLET : '');
+
         if (!wallet) {
             return res.json({
                 success: true,
@@ -918,6 +929,9 @@ app.get('/api/analytics/performance', authenticateToken, async (req: AuthRequest
  */
 app.get('/api/analytics/trades', authenticateToken, async (req: AuthRequest, res: Response) => {
     try {
+        const tenantId = resolveRequestTenantId(req, res);
+        if (!tenantId) return;
+
         const parsedLimit = parseInt(req.query.limit as string, 10);
         const parsedOffset = parseInt(req.query.offset as string, 10);
         const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 500) : 50;
@@ -925,7 +939,7 @@ app.get('/api/analytics/trades', authenticateToken, async (req: AuthRequest, res
 
         // Get trades from all configured users
         const allTrades: any[] = [];
-        const addresses = getConfiguredUserAddresses();
+        const addresses = await getConfiguredUserAddresses(tenantId);
 
         if (addresses.length === 0) {
             return res.json({
@@ -1020,7 +1034,10 @@ app.get('/api/analytics/trades', authenticateToken, async (req: AuthRequest, res
 
 app.get('/api/analytics/traders', authenticateToken, async (req: AuthRequest, res: Response) => {
     try {
-        const addresses = getConfiguredUserAddresses();
+        const tenantId = resolveRequestTenantId(req, res);
+        if (!tenantId) return;
+
+        const addresses = await getConfiguredUserAddresses(tenantId);
 
         if (addresses.length === 0) {
             return res.json({
@@ -1153,26 +1170,60 @@ app.post('/api/reconciliation/run', authenticateToken, requireAdmin, async (req:
  *       200:
  *         description: Configuration retrieved successfully
  */
-app.get('/api/config', authenticateToken, (req: AuthRequest, res: Response) => {
+app.get('/api/config', authenticateToken, async (req: AuthRequest, res: Response) => {
     try {
+        const tenantId = resolveRequestTenantId(req, res);
+        if (!tenantId) return;
+
         // Load current persisted configuration
-        const persistedConfig = loadPersistentConfig();
+        const persistedConfig = await loadPersistedConfig(tenantId);
+        const isActiveTenant = getActiveTenantId() === tenantId;
+        const runtimeConfig = isActiveTenant ? getConfig() : null;
+        const configuredAddresses = await getConfiguredUserAddresses(tenantId);
+
+        const walletSource = persistedConfig.proxyWallet || (runtimeConfig?.PROXY_WALLET || '');
+        const hasPrivateKey = !!(persistedConfig.privateKey || (runtimeConfig?.PRIVATE_KEY || ''));
+        const hasApiKeys = !!(
+            persistedConfig.clobApiKey ||
+            ((runtimeConfig?.CLOB_API_KEY || '') &&
+                (runtimeConfig?.CLOB_SECRET || '') &&
+                (runtimeConfig?.CLOB_PASS_PHRASE || ''))
+        );
 
         // Return safe configuration (exclude sensitive data)
         const safeConfig = {
             // User addresses
-            userAddresses: getConfiguredUserAddresses(),
+            userAddresses: configuredAddresses,
 
             // Trading settings
-            tradeMultiplier: persistedConfig.tradeMultiplier || ENV.TRADE_MULTIPLIER,
-            maxOrderSizeUsd: persistedConfig.maxOrderSizeUsd || ENV.MAX_ORDER_SIZE_USD,
-            minOrderSizeUsd: persistedConfig.minOrderSizeUsd || ENV.MIN_ORDER_SIZE_USD,
-            fetchInterval: persistedConfig.fetchInterval || ENV.FETCH_INTERVAL,
-            retryLimit: persistedConfig.retryLimit || ENV.RETRY_LIMIT,
+            tradeMultiplier:
+                persistedConfig.tradeMultiplier ?? runtimeConfig?.TRADE_MULTIPLIER ?? ENV.TRADE_MULTIPLIER,
+            maxOrderSizeUsd:
+                persistedConfig.maxOrderSizeUsd ??
+                runtimeConfig?.MAX_ORDER_SIZE_USD ??
+                ENV.MAX_ORDER_SIZE_USD,
+            minOrderSizeUsd:
+                persistedConfig.minOrderSizeUsd ??
+                runtimeConfig?.MIN_ORDER_SIZE_USD ??
+                ENV.MIN_ORDER_SIZE_USD,
+            fetchInterval: persistedConfig.fetchInterval ?? runtimeConfig?.FETCH_INTERVAL ?? ENV.FETCH_INTERVAL,
+            retryLimit: persistedConfig.retryLimit ?? runtimeConfig?.RETRY_LIMIT ?? ENV.RETRY_LIMIT,
+            tooOldTimestampHours:
+                persistedConfig.tooOldTimestampHours ??
+                runtimeConfig?.TOO_OLD_TIMESTAMP_HOURS ??
+                ENV.TOO_OLD_TIMESTAMP_HOURS,
 
             // Risk management
-            maxSlippageBps: persistedConfig.maxSlippageBps || ENV.MAX_SLIPPAGE_BPS,
-            tradeAggregationEnabled: persistedConfig.tradeAggregationEnabled ?? ENV.TRADE_AGGREGATION_ENABLED,
+            maxSlippageBps:
+                persistedConfig.maxSlippageBps ?? runtimeConfig?.MAX_SLIPPAGE_BPS ?? ENV.MAX_SLIPPAGE_BPS,
+            tradeAggregationEnabled:
+                persistedConfig.tradeAggregationEnabled ??
+                runtimeConfig?.TRADE_AGGREGATION_ENABLED ??
+                ENV.TRADE_AGGREGATION_ENABLED,
+            tradeAggregationWindowSeconds:
+                persistedConfig.tradeAggregationWindowSeconds ??
+                runtimeConfig?.TRADE_AGGREGATION_WINDOW_SECONDS ??
+                ENV.TRADE_AGGREGATION_WINDOW_SECONDS,
 
             // API settings
             enableApi: persistedConfig.enableApi ?? ENV.ENABLE_API,
@@ -1181,18 +1232,18 @@ app.get('/api/config', authenticateToken, (req: AuthRequest, res: Response) => {
             corsOrigin: persistedConfig.corsOrigin || ENV.CORS_ORIGIN,
 
             // Bot status
-            enabled: persistedConfig.enableTrading ?? ENV.ENABLE_TRADING,
-            copyStrategy: persistedConfig.copyStrategy || ENV.COPY_STRATEGY,
+            enabled: persistedConfig.enableTrading ?? runtimeConfig?.ENABLE_TRADING ?? ENV.ENABLE_TRADING,
+            copyStrategy: persistedConfig.copyStrategy || runtimeConfig?.COPY_STRATEGY || ENV.COPY_STRATEGY,
 
             // Network settings
-            rpcUrl: persistedConfig.rpcUrl || ENV.RPC_URL,
-            clobHttpUrl: persistedConfig.clobHttpUrl || ENV.CLOB_HTTP_URL,
+            rpcUrl: persistedConfig.rpcUrl || runtimeConfig?.RPC_URL || ENV.RPC_URL,
+            clobHttpUrl: persistedConfig.clobHttpUrl || runtimeConfig?.CLOB_HTTP_URL || ENV.CLOB_HTTP_URL,
             usdcContractAddress: persistedConfig.usdcContractAddress || ENV.USDC_CONTRACT_ADDRESS,
 
             // Wallet info (mask sensitive data)
-            proxyWallet: persistedConfig.proxyWallet ? `${persistedConfig.proxyWallet.slice(0, 6)}...${persistedConfig.proxyWallet.slice(-4)}` : (ENV.PROXY_WALLET ? `${ENV.PROXY_WALLET.slice(0, 6)}...${ENV.PROXY_WALLET.slice(-4)}` : null),
-            hasPrivateKey: !!(persistedConfig.privateKey || ENV.PRIVATE_KEY),
-            hasApiKeys: !!(persistedConfig.clobApiKey || (ENV.CLOB_API_KEY && ENV.CLOB_SECRET && ENV.CLOB_PASS_PHRASE)),
+            proxyWallet: walletSource ? `${walletSource.slice(0, 6)}...${walletSource.slice(-4)}` : null,
+            hasPrivateKey,
+            hasApiKeys,
 
             // Metadata
             lastUpdated: persistedConfig.lastUpdated,
@@ -1254,6 +1305,9 @@ app.get('/api/config', authenticateToken, (req: AuthRequest, res: Response) => {
  */
 app.put('/api/config', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
     try {
+        const tenantId = resolveRequestTenantId(req, res);
+        if (!tenantId) return;
+
         const updates = req.body;
 
         // Validate input
@@ -1281,6 +1335,28 @@ app.put('/api/config', authenticateToken, requireAdmin, async (req: AuthRequest,
             });
         }
 
+        if (
+            updates.tooOldTimestampHours !== undefined &&
+            (updates.tooOldTimestampHours < 1 || updates.tooOldTimestampHours > 168)
+        ) {
+            return res.status(400).json({
+                success: false,
+                error: 'Too old timestamp hours must be between 1 and 168',
+                timestamp: Date.now()
+            });
+        }
+
+        if (
+            updates.tradeAggregationWindowSeconds !== undefined &&
+            (updates.tradeAggregationWindowSeconds < 1 || updates.tradeAggregationWindowSeconds > 3600)
+        ) {
+            return res.status(400).json({
+                success: false,
+                error: 'Trade aggregation window must be between 1 and 3600 seconds',
+                timestamp: Date.now()
+            });
+        }
+
         // Persist configuration changes
         const configUpdates: Partial<PersistentConfig> = {};
         if (updates.tradeMultiplier !== undefined) configUpdates.tradeMultiplier = updates.tradeMultiplier;
@@ -1289,16 +1365,22 @@ app.put('/api/config', authenticateToken, requireAdmin, async (req: AuthRequest,
         if (updates.fetchInterval !== undefined) configUpdates.fetchInterval = updates.fetchInterval;
         if (updates.retryLimit !== undefined) configUpdates.retryLimit = updates.retryLimit;
         if (updates.maxSlippageBps !== undefined) configUpdates.maxSlippageBps = updates.maxSlippageBps;
+        if (updates.tooOldTimestampHours !== undefined) {
+            configUpdates.tooOldTimestampHours = updates.tooOldTimestampHours;
+        }
         if (updates.tradeAggregationEnabled !== undefined) configUpdates.tradeAggregationEnabled = updates.tradeAggregationEnabled;
+        if (updates.tradeAggregationWindowSeconds !== undefined) {
+            configUpdates.tradeAggregationWindowSeconds = updates.tradeAggregationWindowSeconds;
+        }
         if (updates.enableApi !== undefined) configUpdates.enableApi = updates.enableApi;
         if (updates.corsOrigin !== undefined) configUpdates.corsOrigin = updates.corsOrigin;
         if (updates.enabled !== undefined) configUpdates.enableTrading = updates.enabled;
 
         const actor = getRequesterIdentity(req);
-        savePersistentConfig(configUpdates, actor);
+        await savePersistedConfig(tenantId, configUpdates, actor);
 
         // Update runtime environment
-        updateEnvironmentFromConfig();
+        await updateEnvironmentFromConfig(tenantId, configUpdates);
 
         Logger.info(`Configuration updated by ${actor}`);
 
@@ -1329,7 +1411,10 @@ app.put('/api/config', authenticateToken, requireAdmin, async (req: AuthRequest,
  */
 app.get('/api/config/user-addresses', authenticateToken, async (req: AuthRequest, res: Response) => {
     try {
-        const addresses = getConfiguredUserAddresses();
+        const tenantId = resolveRequestTenantId(req, res);
+        if (!tenantId) return;
+
+        const addresses = await getConfiguredUserAddresses(tenantId);
         const includeProfiles = String(req.query.includeProfiles || '').toLowerCase() === 'true';
 
         if (!includeProfiles) {
@@ -1362,8 +1447,11 @@ app.get('/api/config/user-addresses', authenticateToken, async (req: AuthRequest
     }
 });
 
-app.post('/api/config/user-addresses', authenticateToken, requireAdmin, (req: AuthRequest, res: Response) => {
+app.post('/api/config/user-addresses', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
     try {
+        const tenantId = resolveRequestTenantId(req, res);
+        if (!tenantId) return;
+
         const normalizedAddress = normalizeAddress(req.body?.address);
 
         if (!normalizedAddress) {
@@ -1374,7 +1462,7 @@ app.post('/api/config/user-addresses', authenticateToken, requireAdmin, (req: Au
             });
         }
 
-        const currentAddresses = getConfiguredUserAddresses();
+        const currentAddresses = await getConfiguredUserAddresses(tenantId);
 
         if (currentAddresses.includes(normalizedAddress)) {
             return res.status(400).json({
@@ -1388,10 +1476,10 @@ app.post('/api/config/user-addresses', authenticateToken, requireAdmin, (req: Au
         const actor = getRequesterIdentity(req);
 
         // Persist the updated addresses
-        savePersistentConfig({ userAddresses: currentAddresses }, actor);
+        await savePersistedConfig(tenantId, { userAddresses: currentAddresses }, actor);
 
         // Update runtime environment
-        updateEnvironmentFromConfig();
+        await updateEnvironmentFromConfig(tenantId, { userAddresses: currentAddresses });
 
         Logger.info(`Added trader address ${normalizedAddress} by ${actor}`);
 
@@ -1410,8 +1498,11 @@ app.post('/api/config/user-addresses', authenticateToken, requireAdmin, (req: Au
     }
 });
 
-app.delete('/api/config/user-addresses/:address', authenticateToken, requireAdmin, (req: AuthRequest, res: Response) => {
+app.delete('/api/config/user-addresses/:address', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
     try {
+        const tenantId = resolveRequestTenantId(req, res);
+        if (!tenantId) return;
+
         const normalizedAddress = normalizeAddress(req.params.address);
         if (!normalizedAddress) {
             return res.status(400).json({
@@ -1421,7 +1512,7 @@ app.delete('/api/config/user-addresses/:address', authenticateToken, requireAdmi
             } as ApiResponse);
         }
 
-        const currentAddresses = getConfiguredUserAddresses();
+        const currentAddresses = await getConfiguredUserAddresses(tenantId);
 
         const filteredAddresses = currentAddresses.filter((addr) => addr.toLowerCase() !== normalizedAddress);
 
@@ -1436,10 +1527,10 @@ app.delete('/api/config/user-addresses/:address', authenticateToken, requireAdmi
         const actor = getRequesterIdentity(req);
 
         // Persist the updated addresses
-        savePersistentConfig({ userAddresses: filteredAddresses }, actor);
+        await savePersistedConfig(tenantId, { userAddresses: filteredAddresses }, actor);
 
         // Update runtime environment
-        updateEnvironmentFromConfig();
+        await updateEnvironmentFromConfig(tenantId, { userAddresses: filteredAddresses });
 
         Logger.info(`Removed trader address ${normalizedAddress} by ${actor}`);
 
@@ -1466,11 +1557,15 @@ app.delete('/api/config/user-addresses/:address', authenticateToken, requireAdmi
  *   get:
  *     summary: Get wallet status (masked)
  */
-app.get('/api/config/wallet', authenticateToken, (req: AuthRequest, res: Response) => {
+app.get('/api/config/wallet', authenticateToken, async (req: AuthRequest, res: Response) => {
     try {
-        const persistedConfig = loadPersistentConfig();
-        const proxyWallet = persistedConfig.proxyWallet || ENV.PROXY_WALLET;
-        const hasPrivateKey = !!(persistedConfig.privateKey || ENV.PRIVATE_KEY);
+        const tenantId = resolveRequestTenantId(req, res);
+        if (!tenantId) return;
+
+        const persistedConfig = await loadPersistedConfig(tenantId);
+        const runtimeConfig = getActiveTenantId() === tenantId ? getConfig() : null;
+        const proxyWallet = persistedConfig.proxyWallet || runtimeConfig?.PROXY_WALLET || '';
+        const hasPrivateKey = !!(persistedConfig.privateKey || runtimeConfig?.PRIVATE_KEY || '');
 
         const walletStatus = {
             proxyWallet: proxyWallet ? `${proxyWallet.slice(0, 6)}...${proxyWallet.slice(-4)}` : null,
@@ -1493,8 +1588,11 @@ app.get('/api/config/wallet', authenticateToken, (req: AuthRequest, res: Respons
     }
 });
 
-app.post('/api/config/wallet', authenticateToken, requireAdmin, (req: AuthRequest, res: Response) => {
+app.post('/api/config/wallet', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
     try {
+        const tenantId = resolveRequestTenantId(req, res);
+        if (!tenantId) return;
+
         const { proxyWallet, privateKey } = req.body;
         const normalizedProxyWallet = proxyWallet ? normalizeAddress(proxyWallet) : null;
 
@@ -1522,10 +1620,10 @@ app.post('/api/config/wallet', authenticateToken, requireAdmin, (req: AuthReques
         if (privateKey) walletUpdates.privateKey = privateKey;
 
         const actor = getRequesterIdentity(req);
-        savePersistentConfig(walletUpdates, actor);
+        await savePersistedConfig(tenantId, walletUpdates, actor);
 
         // Update runtime environment
-        updateEnvironmentFromConfig();
+        await updateEnvironmentFromConfig(tenantId, walletUpdates);
 
         Logger.info(`Wallet credentials updated by ${actor}`);
 
@@ -1558,12 +1656,16 @@ app.post('/api/config/wallet', authenticateToken, requireAdmin, (req: AuthReques
  *   get:
  *     summary: Get API keys status (masked)
  */
-app.get('/api/config/api-keys', authenticateToken, (req: AuthRequest, res: Response) => {
+app.get('/api/config/api-keys', authenticateToken, async (req: AuthRequest, res: Response) => {
     try {
-        const persistedConfig = loadPersistentConfig();
-        const hasApiKey = !!(persistedConfig.clobApiKey || ENV.CLOB_API_KEY);
-        const hasSecret = !!(persistedConfig.clobSecret || ENV.CLOB_SECRET);
-        const hasPassphrase = !!(persistedConfig.clobPassPhrase || ENV.CLOB_PASS_PHRASE);
+        const tenantId = resolveRequestTenantId(req, res);
+        if (!tenantId) return;
+
+        const persistedConfig = await loadPersistedConfig(tenantId);
+        const runtimeConfig = getActiveTenantId() === tenantId ? getConfig() : null;
+        const hasApiKey = !!(persistedConfig.clobApiKey || runtimeConfig?.CLOB_API_KEY || '');
+        const hasSecret = !!(persistedConfig.clobSecret || runtimeConfig?.CLOB_SECRET || '');
+        const hasPassphrase = !!(persistedConfig.clobPassPhrase || runtimeConfig?.CLOB_PASS_PHRASE || '');
 
         const apiKeysStatus = {
             hasApiKey,
@@ -1587,8 +1689,11 @@ app.get('/api/config/api-keys', authenticateToken, (req: AuthRequest, res: Respo
     }
 });
 
-app.post('/api/config/api-keys', authenticateToken, requireAdmin, (req: AuthRequest, res: Response) => {
+app.post('/api/config/api-keys', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
     try {
+        const tenantId = resolveRequestTenantId(req, res);
+        if (!tenantId) return;
+
         const { apiKey, secret, passphrase } = req.body;
 
         if (!apiKey || !secret || !passphrase) {
@@ -1601,14 +1706,22 @@ app.post('/api/config/api-keys', authenticateToken, requireAdmin, (req: AuthRequ
 
         // Persist API credentials
         const actor = getRequesterIdentity(req);
-        savePersistentConfig({
+        await savePersistedConfig(
+            tenantId,
+            {
+                clobApiKey: apiKey,
+                clobSecret: secret,
+                clobPassPhrase: passphrase
+            },
+            actor
+        );
+
+        // Update runtime environment
+        await updateEnvironmentFromConfig(tenantId, {
             clobApiKey: apiKey,
             clobSecret: secret,
             clobPassPhrase: passphrase
-        }, actor);
-
-        // Update runtime environment
-        updateEnvironmentFromConfig();
+        });
 
         Logger.info(`Polymarket API credentials updated by ${actor}`);
 
@@ -1644,9 +1757,10 @@ app.post('/api/config/api-keys', authenticateToken, requireAdmin, (req: AuthRequ
 app.post('/api/moniqo/user', authenticateToken, async (req: AuthRequest, res: Response) => {
     try {
         const { moniqoId, email, walletAddress, preferences } = req.body;
+        const tenantId = typeof moniqoId === 'string' ? moniqoId.trim() : '';
 
         // Validate required fields
-        if (!moniqoId) {
+        if (!tenantId) {
             return res.status(400).json({
                 success: false,
                 error: 'moniqoId is required',
@@ -1654,17 +1768,18 @@ app.post('/api/moniqo/user', authenticateToken, async (req: AuthRequest, res: Re
             });
         }
 
-        // Check if user already exists
-        const existingConfig = loadPersistentConfig();
-        const existingMoniqoId =
-            typeof existingConfig.moniqoId === 'string' ? existingConfig.moniqoId.trim() : '';
-        const isFirstUser = !existingMoniqoId;
-        const isExistingAdmin =
-            existingMoniqoId === moniqoId && existingConfig.role === 'admin';
+        // Check if this tenant already exists
+        const existingConfig = await loadPersistedConfig(tenantId);
+        const hasExistingTenantConfig = Object.keys(existingConfig).length > 0;
+        const existingRole =
+            typeof existingConfig.role === 'string' && existingConfig.role.trim().length > 0
+                ? existingConfig.role.trim()
+                : null;
+        const resolvedRole = existingRole || (hasExistingTenantConfig ? 'user' : 'admin');
 
         // Create user configuration
         const userConfig: Partial<PersistentConfig> = {
-            moniqoId,
+            moniqoId: tenantId,
             email,
             proxyWallet: walletAddress,
             // Set defaults for new users
@@ -1678,21 +1793,19 @@ app.post('/api/moniqo/user', authenticateToken, async (req: AuthRequest, res: Re
             copyStrategy: 'proportional'
         };
 
-        // The first linked user becomes admin and keeps that role on re-link.
-        if (isFirstUser || isExistingAdmin) {
-            userConfig.role = 'admin';
-        }
+        userConfig.role = resolvedRole;
 
         // Save user configuration
-        savePersistentConfig(userConfig, `moniqo-integration-${moniqoId}`);
+        await savePersistedConfig(tenantId, userConfig, `moniqo-integration-${tenantId}`);
+        await updateEnvironmentFromConfig(tenantId, userConfig);
 
-        Logger.info(`Moniqo user ${moniqoId} linked to Polycopy account`);
+        Logger.info(`Moniqo user ${tenantId} linked to Polycopy account`);
 
         res.json({
             success: true,
             data: {
                 message: 'User account created/linked successfully',
-                userId: moniqoId,
+                userId: tenantId,
                 isAdmin: userConfig.role === 'admin',
                 polycopyReady: true
             },
@@ -1708,29 +1821,23 @@ app.post('/api/moniqo/user', authenticateToken, async (req: AuthRequest, res: Re
     }
 });
 
-app.get('/api/moniqo/user', authenticateToken, (req: AuthRequest, res: Response) => {
+app.get('/api/moniqo/user', authenticateToken, async (req: AuthRequest, res: Response) => {
     try {
-        const moniqoId = req.user?.moniqoId;
-
-        if (!moniqoId) {
-            return res.status(400).json({
-                success: false,
-                error: 'No Moniqo user ID found in token',
-                timestamp: Date.now()
-            });
-        }
+        const tenantId = resolveRequestTenantId(req, res);
+        if (!tenantId) return;
 
         // Load user configuration
-        const config = loadPersistentConfig();
+        const config = await loadPersistedConfig(tenantId);
+        const userAddresses = await getConfiguredUserAddresses(tenantId);
 
         // Find user-specific data (you might want to store per-user configs)
         const userData = {
-            moniqoId,
+            moniqoId: config.moniqoId || req.user?.moniqoId || null,
             email: config.email,
             walletAddress: config.proxyWallet,
             isConfigured: !!(config.proxyWallet && config.userAddresses?.length),
             tradingEnabled: config.enableTrading || false,
-            userAddresses: getConfiguredUserAddresses(),
+            userAddresses,
             lastUpdated: config.lastUpdated
         };
 
@@ -1757,6 +1864,9 @@ app.get('/api/moniqo/user', authenticateToken, (req: AuthRequest, res: Response)
  */
 app.post('/api/config/setup', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
     try {
+        const tenantId = resolveRequestTenantId(req, res);
+        if (!tenantId) return;
+
         const setupData = req.body;
         const normalizedProxyWallet = normalizeAddress(setupData.proxyWallet);
 
@@ -1825,14 +1935,24 @@ app.post('/api/config/setup', authenticateToken, requireAdmin, async (req: AuthR
         if (setupData.maxOrderSizeUsd) setupConfig.maxOrderSizeUsd = setupData.maxOrderSizeUsd;
         if (setupData.minOrderSizeUsd) setupConfig.minOrderSizeUsd = setupData.minOrderSizeUsd;
         if (setupData.fetchInterval) setupConfig.fetchInterval = setupData.fetchInterval;
+        if (setupData.retryLimit) setupConfig.retryLimit = setupData.retryLimit;
         if (setupData.maxSlippageBps) setupConfig.maxSlippageBps = setupData.maxSlippageBps;
+        if (setupData.tooOldTimestampHours) {
+            setupConfig.tooOldTimestampHours = setupData.tooOldTimestampHours;
+        }
+        if (setupData.tradeAggregationEnabled !== undefined) {
+            setupConfig.tradeAggregationEnabled = !!setupData.tradeAggregationEnabled;
+        }
+        if (setupData.tradeAggregationWindowSeconds) {
+            setupConfig.tradeAggregationWindowSeconds = setupData.tradeAggregationWindowSeconds;
+        }
 
         // Persist complete setup
         const actor = getRequesterIdentity(req);
-        savePersistentConfig(setupConfig, actor);
+        await savePersistedConfig(tenantId, setupConfig, actor);
 
         // Update runtime environment
-        updateEnvironmentFromConfig();
+        await updateEnvironmentFromConfig(tenantId, setupConfig);
 
         Logger.info(`Complete bot setup completed by ${actor}`);
 

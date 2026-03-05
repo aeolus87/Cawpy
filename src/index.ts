@@ -1,6 +1,7 @@
 import connectDB, { closeDB } from './config/db';
 import { ENV } from './config/env';
 import { startTrading, stopTrading } from './services/runtimeManager';
+import { loadPersistedConfigByLegacyId } from './models/botConfig';
 import Logger from './utils/logger';
 
 const USER_ADDRESSES = ENV.USER_ADDRESSES;
@@ -114,7 +115,17 @@ export const main = async () => {
             Logger.warning('Health check failed, but continuing startup...');
         }
 
-        const startResult = await startTrading('boot');
+        let bootTenantId = 'boot';
+        try {
+            const legacyTenantConfig = await loadPersistedConfigByLegacyId();
+            if (legacyTenantConfig?.tenantId) {
+                bootTenantId = legacyTenantConfig.tenantId;
+            }
+        } catch (error) {
+            Logger.warning(`Unable to resolve legacy boot tenant: ${error}`);
+        }
+
+        const startResult = await startTrading('boot', bootTenantId);
         if (!startResult.success) {
             Logger.error(`Trading runtime failed to start in boot mode: ${startResult.error}`);
         }

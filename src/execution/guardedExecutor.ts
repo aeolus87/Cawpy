@@ -14,7 +14,7 @@
  */
 
 import { ClobClient, OrderType, Side } from '@polymarket/clob-client';
-import { ENV } from '../config/env';
+import { getConfig } from '../config/configProvider';
 import Logger from '../utils/logger';
 import {
     checkMarketViability,
@@ -30,10 +30,11 @@ import { getWorkerId } from '../utils/leaseManager';
 // Constants
 // ============================================================================
 
-const RETRY_LIMIT = ENV.RETRY_LIMIT;
-const MAX_SLIPPAGE_BPS = ENV.MAX_SLIPPAGE_BPS;
 const HARD_CAP_MAX_SLIPPAGE_BPS = 1000;
-const EFFECTIVE_MAX_SLIPPAGE_BPS = Math.min(MAX_SLIPPAGE_BPS, HARD_CAP_MAX_SLIPPAGE_BPS);
+
+const getRetryLimit = (): number => getConfig().RETRY_LIMIT;
+const getEffectiveMaxSlippageBps = (): number =>
+    Math.min(getConfig().MAX_SLIPPAGE_BPS, HARD_CAP_MAX_SLIPPAGE_BPS);
 
 // Polymarket minimum order sizes
 const MIN_ORDER_SIZE_USD = 1.0;
@@ -185,7 +186,7 @@ function checkTimestampGate(request: OrderRequest): GateCheckResult {
 
     const timestampMs =
         request.tradeTimestamp < 1e12 ? request.tradeTimestamp * 1000 : request.tradeTimestamp;
-    const maxAgeMs = ENV.TOO_OLD_TIMESTAMP_HOURS * 60 * 60 * 1000;
+    const maxAgeMs = getConfig().TOO_OLD_TIMESTAMP_HOURS * 60 * 60 * 1000;
     const isFresh = Date.now() - timestampMs <= maxAgeMs;
 
     return isFresh
@@ -360,10 +361,11 @@ function checkSlippageGate(
             ? ((currentPrice - traderPrice) / traderPrice) * 10000
             : ((traderPrice - currentPrice) / traderPrice) * 10000;
     
-    if (slippageBps > EFFECTIVE_MAX_SLIPPAGE_BPS) {
+    const effectiveMaxSlippageBps = getEffectiveMaxSlippageBps();
+    if (slippageBps > effectiveMaxSlippageBps) {
         return {
             passed: false,
-            reason: `slippage_${slippageBps.toFixed(0)}bps_exceeds_max_${EFFECTIVE_MAX_SLIPPAGE_BPS}bps`,
+            reason: `slippage_${slippageBps.toFixed(0)}bps_exceeds_max_${effectiveMaxSlippageBps}bps`,
         };
     }
     
@@ -708,7 +710,9 @@ async function executeOrderLoop(
     let totalFilledUsd = 0;
     let lastOrderId: string | undefined;
     
-    while (remaining > 0 && retry < RETRY_LIMIT) {
+    const retryLimit = getRetryLimit();
+
+    while (remaining > 0 && retry < retryLimit) {
         // Fetch orderbook
         const orderBook = await ctx.clobClient.getOrderBook(request.tokenId);
         
@@ -779,7 +783,7 @@ async function executeOrderLoop(
                     break;
                 }
                 retry++;
-                Logger.warning(`Order failed (attempt ${retry}/${RETRY_LIMIT})${errorMessage ? ` - ${errorMessage}` : ''}`);
+                Logger.warning(`Order failed (attempt ${retry}/${retryLimit})${errorMessage ? ` - ${errorMessage}` : ''}`);
             }
         } else {
             // SELL/MERGE logic
@@ -851,7 +855,7 @@ async function executeOrderLoop(
                     break;
                 }
                 retry++;
-                Logger.warning(`Order failed (attempt ${retry}/${RETRY_LIMIT})${errorMessage ? ` - ${errorMessage}` : ''}`);
+                Logger.warning(`Order failed (attempt ${retry}/${retryLimit})${errorMessage ? ` - ${errorMessage}` : ''}`);
             }
         }
     }
@@ -873,7 +877,7 @@ async function executeOrderLoop(
         };
     }
     
-    if (retry >= RETRY_LIMIT) {
+    if (retry >= retryLimit) {
         return {
             success: false,
             executed: totalFilledTokens > 0,

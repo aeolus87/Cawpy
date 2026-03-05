@@ -1,6 +1,6 @@
 import { ClobClient } from '@polymarket/clob-client';
 import { UserActivityInterface, UserPositionInterface } from '../interfaces/User';
-import { ENV } from '../config/env';
+import { getConfig } from '../config/configProvider';
 import { getUserActivityModel } from '../models/userHistory';
 import fetchData from '../utils/fetchData';
 import getMyBalance from '../utils/getMyBalance';
@@ -8,9 +8,9 @@ import postOrder from '../utils/postOrder';
 import Logger from '../utils/logger';
 import { getWorkerId } from '../utils/leaseManager';
 
-const RETRY_LIMIT = ENV.RETRY_LIMIT;
-const TRADE_AGGREGATION_ENABLED = ENV.TRADE_AGGREGATION_ENABLED;
-const TRADE_AGGREGATION_WINDOW_SECONDS = ENV.TRADE_AGGREGATION_WINDOW_SECONDS;
+const getRetryLimit = (): number => getConfig().RETRY_LIMIT;
+const getTradeAggregationEnabled = (): boolean => getConfig().TRADE_AGGREGATION_ENABLED;
+const getTradeAggregationWindowSeconds = (): number => getConfig().TRADE_AGGREGATION_WINDOW_SECONDS;
 const TRADE_AGGREGATION_MIN_TOTAL_USD = 1.0; // Polymarket minimum
 const LEASE_TIMEOUT_MS = 30000;
 
@@ -19,14 +19,25 @@ let userActivityModels: Array<{
     address: string;
     model: any;
 }> | null = null;
+let userActivityModelSignature = '';
+
+const buildAddressSignature = (addresses: string[]): string => addresses.join(',');
+
+export const resetUserActivityModels = () => {
+    userActivityModels = null;
+    userActivityModelSignature = '';
+};
 
 const getUserActivityModels = () => {
-    if (!userActivityModels) {
-        const USER_ADDRESSES = ENV.USER_ADDRESSES;
-        if (!USER_ADDRESSES || USER_ADDRESSES.length === 0) {
-            throw new Error('USER_ADDRESSES is not defined or empty');
-        }
-        userActivityModels = USER_ADDRESSES.map((address) => ({
+    const userAddresses = getConfig().USER_ADDRESSES;
+    if (!userAddresses || userAddresses.length === 0) {
+        throw new Error('USER_ADDRESSES is not defined or empty');
+    }
+
+    const signature = buildAddressSignature(userAddresses);
+    if (!userActivityModels || signature !== userActivityModelSignature) {
+        userActivityModelSignature = signature;
+        userActivityModels = userAddresses.map((address) => ({
             address,
             model: getUserActivityModel(address),
         }));
@@ -35,7 +46,7 @@ const getUserActivityModels = () => {
 };
 
 const getProxyWallet = () => {
-    const wallet = ENV.PROXY_WALLET;
+    const wallet = getConfig().PROXY_WALLET;
     if (!wallet) {
         throw new Error('PROXY_WALLET is not defined');
     }
@@ -43,7 +54,7 @@ const getProxyWallet = () => {
 };
 
 const getUserAddresses = () => {
-    const addresses = ENV.USER_ADDRESSES;
+    const addresses = getConfig().USER_ADDRESSES;
     if (!addresses || addresses.length === 0) {
         throw new Error('USER_ADDRESSES is not defined or empty');
     }
@@ -77,7 +88,7 @@ const claimNextTrade = async (
 ): Promise<TradeWithUser | null> => {
     // Claim trades that are either:
     // 1. New trades (bot=false, botExcutedTime=0, or lifecycleState='detected')
-    // 2. Failed trades that are eligible for retry (lifecycleState='failed', retryCount < RETRY_LIMIT)
+    // 2. Failed trades that are eligible for retry (lifecycleState='failed', retryCount < runtime retry limit)
     const now = Date.now();
     const workerId = getWorkerId();
 
@@ -97,7 +108,7 @@ const claimNextTrade = async (
                     // Failed trade eligible for retry
                     {
                         lifecycleState: 'failed',
-                        retryCount: { $lt: RETRY_LIMIT },
+                        retryCount: { $lt: getRetryLimit() },
                         // Only retry if last retry was more than 30 seconds ago
                         $or: [
                             { lastRetryAt: { $exists: false } },
@@ -196,7 +207,7 @@ const addToAggregationBuffer = (trade: TradeWithUser): void => {
 const getReadyAggregatedTrades = (): AggregatedTrade[] => {
     const ready: AggregatedTrade[] = [];
     const now = Date.now();
-    const windowMs = TRADE_AGGREGATION_WINDOW_SECONDS * 1000;
+    const windowMs = getTradeAggregationWindowSeconds() * 1000;
 
     for (const [key, agg] of tradeAggregationBuffer.entries()) {
         const timeElapsed = now - agg.firstTradeTime;
@@ -351,9 +362,9 @@ export const stopTradeExecutor = () => {
 
 const tradeExecutor = async (clobClient: ClobClient) => {
     Logger.success(`Trade executor ready for ${getUserAddresses().length} trader(s)`);
-    if (TRADE_AGGREGATION_ENABLED) {
+    if (getTradeAggregationEnabled()) {
         Logger.info(
-            `Trade aggregation enabled: ${TRADE_AGGREGATION_WINDOW_SECONDS}s window, $${TRADE_AGGREGATION_MIN_TOTAL_USD} minimum`
+            `Trade aggregation enabled: ${getTradeAggregationWindowSeconds()}s window, $${TRADE_AGGREGATION_MIN_TOTAL_USD} minimum`
         );
     }
 
@@ -361,7 +372,7 @@ const tradeExecutor = async (clobClient: ClobClient) => {
     while (isRunning) {
         const trades = await readTempTrades();
 
-        if (TRADE_AGGREGATION_ENABLED) {
+        if (getTradeAggregationEnabled()) {
             // Process with aggregation logic
             if (trades.length > 0) {
                 Logger.clearLine();

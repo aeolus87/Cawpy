@@ -12,7 +12,9 @@ import rateLimit from 'express-rate-limit';
 import swaggerJsdoc from 'swagger-jsdoc';
 import * as swaggerUi from 'swagger-ui-express';
 import * as jwt from 'jsonwebtoken';
+import mongoose from 'mongoose';
 import { ENV } from '../config/env';
+import connectDB from '../config/db';
 import Logger from '../utils/logger';
 
 // NOTE: Trading services (tradeExecutor, tradeMonitor, reconciliation) are
@@ -30,6 +32,10 @@ import * as path from 'path';
 // ============================================================================
 
 const CONFIG_FILE_PATH = path.join(process.cwd(), 'config.json');
+const LOGS_DIR_PATH = path.join(process.cwd(), 'logs');
+const ETH_ADDRESS_REGEX = /^0x[a-fA-F0-9]{40}$/;
+
+let dbConnectionAttempt: Promise<boolean> | null = null;
 
 interface PersistentConfig {
     // User identification
@@ -193,6 +199,29 @@ updateEnvironmentFromConfig();
 // Types & Interfaces
 // ============================================================================
 
+type LogLevel = 'info' | 'success' | 'warning' | 'error';
+type LogCategory = 'configuration' | 'trading' | 'database' | 'authentication' | 'system';
+
+interface ParsedLogEntry {
+    timestamp: string;
+    level: LogLevel;
+    category: LogCategory;
+    message: string;
+    actor?: string;
+    raw: string;
+}
+
+interface PolymarketTraderProfile {
+    boundAddress: string;
+    canonicalProxyWallet: string;
+    displayName: string;
+    name: string | null;
+    pseudonym: string | null;
+    bio: string | null;
+    verifiedBadge: boolean;
+    profileImage: string | null;
+    profileUrl: string;
+}
 
 interface ApiResponse<T = any> {
     success: boolean;
@@ -200,6 +229,217 @@ interface ApiResponse<T = any> {
     error?: string;
     timestamp: number;
 }
+
+const normalizeAddress = (value: unknown): string | null => {
+    if (typeof value !== 'string') return null;
+    const trimmed = value.trim();
+    return ETH_ADDRESS_REGEX.test(trimmed) ? trimmed.toLowerCase() : null;
+};
+
+const maskAddress = (address: string): string => `${address.slice(0, 6)}...${address.slice(-4)}`;
+
+const getRequesterIdentity = (req: AuthRequest): string => {
+    const normalizedAddress = normalizeAddress(req.user?.address);
+    if (normalizedAddress) return normalizedAddress;
+    if (req.user?.moniqoId) return `moniqo:${req.user.moniqoId}`;
+    if (req.user?.email) return `email:${req.user.email}`;
+    return 'unknown';
+};
+
+const getConfiguredUserAddresses = (): string[] => {
+    const persistedConfig = loadPersistentConfig();
+
+    const persistedAddresses = Array.isArray(persistedConfig.userAddresses)
+        ? persistedConfig.userAddresses
+              .map((address) => normalizeAddress(address))
+              .filter((address): address is string => !!address)
+        : [];
+
+    if (persistedAddresses.length > 0) {
+        return Array.from(new Set(persistedAddresses));
+    }
+
+    return Array.from(
+        new Set(
+            (ENV.USER_ADDRESSES || [])
+                .map((address) => normalizeAddress(address))
+                .filter((address): address is string => !!address)
+        )
+    );
+};
+
+const waitForDbConnection = async (timeoutMs = 5000): Promise<boolean> => {
+    const start = Date.now();
+    while (mongoose.connection.readyState === 2 && Date.now() - start < timeoutMs) {
+        await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return mongoose.connection.readyState === 1;
+};
+
+const ensureDatabaseConnection = async (): Promise<boolean> => {
+    if (mongoose.connection.readyState === 1) {
+        return true;
+    }
+
+    if (mongoose.connection.readyState === 2) {
+        return waitForDbConnection();
+    }
+
+    if (!dbConnectionAttempt) {
+        dbConnectionAttempt = connectDB()
+            .then((connected) => connected === true)
+            .catch((error) => {
+                Logger.error(`Database connection error: ${error}`);
+                return false;
+            })
+            .finally(() => {
+                dbConnectionAttempt = null;
+            });
+    }
+
+    return dbConnectionAttempt;
+};
+
+const parseLogLevel = (prefix: string, message: string): LogLevel => {
+    const upperPrefix = prefix.toUpperCase();
+    if (upperPrefix.includes('ERROR') || upperPrefix.includes('FAILED')) return 'error';
+    if (upperPrefix.includes('WARNING')) return 'warning';
+    if (upperPrefix.includes('SUCCESS')) return 'success';
+    if (message.toLowerCase().includes('error')) return 'error';
+    return 'info';
+};
+
+const parseLogCategory = (message: string): LogCategory => {
+    const lowered = message.toLowerCase();
+    if (
+        lowered.includes('config') ||
+        lowered.includes('wallet credentials') ||
+        lowered.includes('api credentials')
+    ) {
+        return 'configuration';
+    }
+    if (lowered.includes('trade') || lowered.includes('order') || lowered.includes('trader')) {
+        return 'trading';
+    }
+    if (lowered.includes('mongo') || lowered.includes('database') || lowered.includes('mongoose')) {
+        return 'database';
+    }
+    if (lowered.includes('auth') || lowered.includes('token') || lowered.includes('login')) {
+        return 'authentication';
+    }
+    return 'system';
+};
+
+const extractActorFromMessage = (message: string): string | undefined => {
+    const byMatch = message.match(/\bby\s+([^\s]+)$/i);
+    if (byMatch?.[1]) return byMatch[1];
+    const moniqoMatch = message.match(/\bmoniqo[-\w:]+/i);
+    if (moniqoMatch?.[0]) return moniqoMatch[0];
+    return undefined;
+};
+
+const parseLogLine = (line: string): ParsedLogEntry | null => {
+    const trimmed = line.trim();
+    if (!trimmed) return null;
+
+    const lineMatch = trimmed.match(/^\[([^\]]+)\]\s(.+)$/);
+    if (!lineMatch) return null;
+
+    const timestamp = lineMatch[1];
+    const payload = lineMatch[2];
+    const payloadMatch = payload.match(/^([A-Z ]+):\s(.*)$/);
+    const prefix = payloadMatch?.[1]?.trim() || 'INFO';
+    const message = payloadMatch?.[2]?.trim() || payload;
+    const level = parseLogLevel(prefix, message);
+
+    return {
+        timestamp,
+        level,
+        category: parseLogCategory(message),
+        message,
+        actor: extractActorFromMessage(message),
+        raw: trimmed
+    };
+};
+
+const readRecentLogEntries = (limit: number): ParsedLogEntry[] => {
+    if (!fs.existsSync(LOGS_DIR_PATH)) {
+        return [];
+    }
+
+    const files = fs
+        .readdirSync(LOGS_DIR_PATH)
+        .filter((name) => name.startsWith('bot-') && name.endsWith('.log'))
+        .sort((a, b) => b.localeCompare(a));
+
+    const collectedLines: string[] = [];
+
+    for (const fileName of files) {
+        const filePath = path.join(LOGS_DIR_PATH, fileName);
+        const fileLines = fs
+            .readFileSync(filePath, 'utf8')
+            .split('\n')
+            .filter(Boolean);
+
+        for (let index = fileLines.length - 1; index >= 0 && collectedLines.length < limit; index--) {
+            collectedLines.push(fileLines[index]);
+        }
+
+        if (collectedLines.length >= limit) break;
+    }
+
+    return collectedLines
+        .reverse()
+        .map((line) => parseLogLine(line))
+        .filter((entry): entry is ParsedLogEntry => !!entry);
+};
+
+const mapPolymarketProfile = (profile: any, boundAddress: string): PolymarketTraderProfile => {
+    const proxyWallet =
+        normalizeAddress(profile?.proxyWallet) ||
+        normalizeAddress(profile?.address) ||
+        boundAddress;
+    const displayName =
+        (typeof profile?.name === 'string' && profile.name.trim()) ||
+        (typeof profile?.pseudonym === 'string' && profile.pseudonym.trim()) ||
+        maskAddress(proxyWallet);
+
+    return {
+        boundAddress,
+        canonicalProxyWallet: proxyWallet,
+        displayName,
+        name: typeof profile?.name === 'string' ? profile.name : null,
+        pseudonym: typeof profile?.pseudonym === 'string' ? profile.pseudonym : null,
+        bio: typeof profile?.bio === 'string' ? profile.bio : null,
+        verifiedBadge: Boolean(profile?.verifiedBadge),
+        profileImage:
+            (typeof profile?.profileImageOptimized === 'string' && profile.profileImageOptimized) ||
+            (typeof profile?.profileImage === 'string' && profile.profileImage) ||
+            null,
+        profileUrl: `https://polymarket.com/profile/${proxyWallet}`
+    };
+};
+
+const fetchPolymarketTraderProfile = async (address: string): Promise<PolymarketTraderProfile> => {
+    const fallback = mapPolymarketProfile({}, address);
+    const endpoints = [
+        `https://gamma-api.polymarket.com/public-profile?address=${address}`,
+        `https://gamma-api.polymarket.com/public-profile?wallet_address=${address}`
+    ];
+
+    for (const endpoint of endpoints) {
+        try {
+            const profile = await fetchData(endpoint);
+            if (profile && typeof profile === 'object') {
+                return mapPolymarketProfile(profile, address);
+            }
+        } catch (error) {
+            continue;
+        }
+    }
+
+    return fallback;
+};
 
 // ============================================================================
 // Rate Limiting
@@ -239,6 +479,17 @@ app.use(express.urlencoded({ extended: true }));
 
 // Rate limiting
 app.use('/api/', limiter);
+
+// Attempt DB connection early so analytics endpoints are ready for FE usage.
+void ensureDatabaseConnection().then((connected) => {
+    if (connected) {
+        Logger.info('MongoDB connection ready for API analytics routes');
+    } else {
+        Logger.warning(
+            'MongoDB is not connected. Trade history endpoints will return 503 until MONGO_URI is configured'
+        );
+    }
+});
 
 // ============================================================================
 // Swagger Documentation
@@ -341,7 +592,6 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
         const persistedConfig = loadPersistentConfig();
 
         let userData: any = {};
-        let token: string;
 
         // Method 1: Traditional wallet signature (for direct Polycopy users)
         if (address && signature) {
@@ -391,7 +641,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
         }
 
         // Generate Polycopy JWT token
-        token = jwt.sign(userData, ENV.JWT_SECRET, { expiresIn: '24h' });
+        const token = jwt.sign(userData, ENV.JWT_SECRET, { expiresIn: '24h' });
 
         res.json({
             success: true,
@@ -660,12 +910,14 @@ app.get('/api/analytics/performance', authenticateToken, async (req: AuthRequest
  */
 app.get('/api/analytics/trades', authenticateToken, async (req: AuthRequest, res: Response) => {
     try {
-        const limit = parseInt(req.query.limit as string) || 50;
-        const offset = parseInt(req.query.offset as string) || 0;
+        const parsedLimit = parseInt(req.query.limit as string, 10);
+        const parsedOffset = parseInt(req.query.offset as string, 10);
+        const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 500) : 50;
+        const offset = Number.isFinite(parsedOffset) ? Math.max(parsedOffset, 0) : 0;
 
         // Get trades from all configured users
         const allTrades: any[] = [];
-        const addresses = ENV.USER_ADDRESSES || [];
+        const addresses = getConfiguredUserAddresses();
 
         if (addresses.length === 0) {
             return res.json({
@@ -676,20 +928,62 @@ app.get('/api/analytics/trades', authenticateToken, async (req: AuthRequest, res
             } as ApiResponse);
         }
 
-        for (const address of addresses) {
-            const { getUserActivityModel } = await import('../models/userHistory');
-            const UserActivity = getUserActivityModel(address);
-            const trades = await UserActivity.find()
-                .sort({ timestamp: -1 })
-                .limit(limit)
-                .skip(offset)
-                .exec();
-
-            allTrades.push(...trades.map(trade => ({
-                ...trade.toObject(),
-                userAddress: address
-            })));
+        const dbConnected = await ensureDatabaseConnection();
+        if (!dbConnected) {
+            return res.status(503).json({
+                success: false,
+                error: 'Trade history is temporarily unavailable because MongoDB is not connected',
+                data: {
+                    hint: 'Set a valid MONGO_URI and restart API, then retry /api/analytics/trades',
+                    mongoReadyState: mongoose.connection.readyState
+                },
+                timestamp: Date.now()
+            } as ApiResponse);
         }
+
+        const { getUserActivityModel } = await import('../models/userHistory');
+        const failedAddresses: string[] = [];
+
+        const perAddressTrades = await Promise.all(
+            addresses.map(async (address) => {
+                try {
+                    const UserActivity = getUserActivityModel(address);
+                    const trades = await UserActivity.find()
+                        .sort({ timestamp: -1 })
+                        .limit(limit)
+                        .skip(offset)
+                        .lean()
+                        .exec();
+
+                    return trades.map((trade: any) => {
+                        const canonicalProxyWallet = normalizeAddress(trade?.proxyWallet) || address;
+                        const displayName =
+                            (typeof trade?.name === 'string' && trade.name.trim()) ||
+                            (typeof trade?.pseudonym === 'string' && trade.pseudonym.trim()) ||
+                            maskAddress(canonicalProxyWallet);
+
+                        return {
+                            ...trade,
+                            userAddress: address,
+                            trader: {
+                                boundAddress: address,
+                                canonicalProxyWallet,
+                                displayName,
+                                name: typeof trade?.name === 'string' ? trade.name : null,
+                                pseudonym: typeof trade?.pseudonym === 'string' ? trade.pseudonym : null,
+                                profileUrl: `https://polymarket.com/profile/${canonicalProxyWallet}`
+                            }
+                        };
+                    });
+                } catch (error) {
+                    failedAddresses.push(address);
+                    Logger.warning(`Trade history query failed for ${address}: ${error}`);
+                    return [];
+                }
+            })
+        );
+
+        allTrades.push(...perAddressTrades.flat());
 
         // Sort by timestamp and limit
         allTrades.sort((a, b) => b.timestamp - a.timestamp);
@@ -701,7 +995,8 @@ app.get('/api/analytics/trades', authenticateToken, async (req: AuthRequest, res
                 trades: limitedTrades,
                 count: limitedTrades.length,
                 offset,
-                limit
+                limit,
+                failedAddresses
             },
             timestamp: Date.now()
         } as ApiResponse);
@@ -710,6 +1005,93 @@ app.get('/api/analytics/trades', authenticateToken, async (req: AuthRequest, res
         res.status(500).json({
             success: false,
             error: 'Failed to fetch trade history',
+            timestamp: Date.now()
+        } as ApiResponse);
+    }
+});
+
+app.get('/api/analytics/traders', authenticateToken, async (req: AuthRequest, res: Response) => {
+    try {
+        const addresses = getConfiguredUserAddresses();
+
+        if (addresses.length === 0) {
+            return res.json({
+                success: true,
+                data: { traders: [], count: 0 },
+                message: 'No trader addresses configured. Add traders via /api/config/user-addresses',
+                timestamp: Date.now()
+            } as ApiResponse);
+        }
+
+        const traders = await Promise.all(
+            addresses.map(async (address) => fetchPolymarketTraderProfile(address))
+        );
+
+        res.json({
+            success: true,
+            data: {
+                traders,
+                count: traders.length
+            },
+            timestamp: Date.now()
+        } as ApiResponse);
+    } catch (error) {
+        Logger.error(`Trader identity lookup error: ${error}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to resolve trader identities',
+            timestamp: Date.now()
+        } as ApiResponse);
+    }
+});
+
+app.get('/api/system/logs', authenticateToken, async (req: AuthRequest, res: Response) => {
+    try {
+        const parsedLimit = parseInt(req.query.limit as string, 10);
+        const limit = Number.isFinite(parsedLimit) ? Math.min(Math.max(parsedLimit, 1), 500) : 100;
+        const levelFilter = typeof req.query.level === 'string' ? req.query.level.toLowerCase() : '';
+        const categoryFilter = typeof req.query.category === 'string' ? req.query.category.toLowerCase() : '';
+        const rawEntries = readRecentLogEntries(Math.min(limit * 5, 2000));
+
+        const filteredEntries = rawEntries.filter((entry) => {
+            const levelMatches = !levelFilter || entry.level === levelFilter;
+            const categoryMatches = !categoryFilter || entry.category === categoryFilter;
+            return levelMatches && categoryMatches;
+        });
+
+        const logs = filteredEntries.slice(-limit);
+        const byLevel = {
+            info: logs.filter((entry) => entry.level === 'info').length,
+            success: logs.filter((entry) => entry.level === 'success').length,
+            warning: logs.filter((entry) => entry.level === 'warning').length,
+            error: logs.filter((entry) => entry.level === 'error').length
+        };
+        const byCategory = {
+            configuration: logs.filter((entry) => entry.category === 'configuration').length,
+            trading: logs.filter((entry) => entry.category === 'trading').length,
+            database: logs.filter((entry) => entry.category === 'database').length,
+            authentication: logs.filter((entry) => entry.category === 'authentication').length,
+            system: logs.filter((entry) => entry.category === 'system').length
+        };
+
+        res.json({
+            success: true,
+            data: {
+                logs,
+                summary: {
+                    total: logs.length,
+                    byLevel,
+                    byCategory,
+                    latestTimestamp: logs.length > 0 ? logs[logs.length - 1].timestamp : null
+                }
+            },
+            timestamp: Date.now()
+        } as ApiResponse);
+    } catch (error) {
+        Logger.error(`System logs endpoint error: ${error}`);
+        res.status(500).json({
+            success: false,
+            error: 'Failed to read system logs',
             timestamp: Date.now()
         } as ApiResponse);
     }
@@ -771,7 +1153,7 @@ app.get('/api/config', authenticateToken, (req: AuthRequest, res: Response) => {
         // Return safe configuration (exclude sensitive data)
         const safeConfig = {
             // User addresses
-            userAddresses: persistedConfig.userAddresses || ENV.USER_ADDRESSES || [],
+            userAddresses: getConfiguredUserAddresses(),
 
             // Trading settings
             tradeMultiplier: persistedConfig.tradeMultiplier || ENV.TRADE_MULTIPLIER,
@@ -904,12 +1286,13 @@ app.put('/api/config', authenticateToken, requireAdmin, async (req: AuthRequest,
         if (updates.corsOrigin !== undefined) configUpdates.corsOrigin = updates.corsOrigin;
         if (updates.enabled !== undefined) configUpdates.enableTrading = updates.enabled;
 
-        savePersistentConfig(configUpdates, req.user!.address || req.user!.moniqoId || 'unknown');
+        const actor = getRequesterIdentity(req);
+        savePersistentConfig(configUpdates, actor);
 
         // Update runtime environment
         updateEnvironmentFromConfig();
 
-        Logger.info(`Configuration updated by ${req.user?.address}`);
+        Logger.info(`Configuration updated by ${actor}`);
 
         res.json({
             success: true,
@@ -936,14 +1319,29 @@ app.put('/api/config', authenticateToken, requireAdmin, async (req: AuthRequest,
  *   delete:
  *     summary: Remove a trader address
  */
-app.get('/api/config/user-addresses', authenticateToken, (req: AuthRequest, res: Response) => {
+app.get('/api/config/user-addresses', authenticateToken, async (req: AuthRequest, res: Response) => {
     try {
-        const persistedConfig = loadPersistentConfig();
-        const addresses = persistedConfig.userAddresses || ENV.USER_ADDRESSES || [];
+        const addresses = getConfiguredUserAddresses();
+        const includeProfiles = String(req.query.includeProfiles || '').toLowerCase() === 'true';
+
+        if (!includeProfiles) {
+            return res.json({
+                success: true,
+                data: addresses,
+                timestamp: Date.now()
+            } as ApiResponse);
+        }
+
+        const traders = await Promise.all(
+            addresses.map(async (address) => fetchPolymarketTraderProfile(address))
+        );
 
         res.json({
             success: true,
-            data: addresses,
+            data: {
+                addresses: traders,
+                count: traders.length
+            },
             timestamp: Date.now()
         } as ApiResponse);
     } catch (error) {
@@ -958,9 +1356,9 @@ app.get('/api/config/user-addresses', authenticateToken, (req: AuthRequest, res:
 
 app.post('/api/config/user-addresses', authenticateToken, requireAdmin, (req: AuthRequest, res: Response) => {
     try {
-        const { address } = req.body;
+        const normalizedAddress = normalizeAddress(req.body?.address);
 
-        if (!address || !address.match(/^0x[a-fA-F0-9]{40}$/)) {
+        if (!normalizedAddress) {
             return res.status(400).json({
                 success: false,
                 error: 'Invalid Ethereum address format',
@@ -968,9 +1366,9 @@ app.post('/api/config/user-addresses', authenticateToken, requireAdmin, (req: Au
             });
         }
 
-        const currentAddresses = ENV.USER_ADDRESSES || [];
+        const currentAddresses = getConfiguredUserAddresses();
 
-        if (currentAddresses.includes(address.toLowerCase())) {
+        if (currentAddresses.includes(normalizedAddress)) {
             return res.status(400).json({
                 success: false,
                 error: 'Address already exists',
@@ -978,15 +1376,16 @@ app.post('/api/config/user-addresses', authenticateToken, requireAdmin, (req: Au
             });
         }
 
-        currentAddresses.push(address.toLowerCase());
+        currentAddresses.push(normalizedAddress);
+        const actor = getRequesterIdentity(req);
 
         // Persist the updated addresses
-        savePersistentConfig({ userAddresses: currentAddresses }, req.user!.address || req.user!.moniqoId || 'unknown');
+        savePersistentConfig({ userAddresses: currentAddresses }, actor);
 
         // Update runtime environment
         updateEnvironmentFromConfig();
 
-        Logger.info(`Added trader address ${address} by ${req.user?.address}`);
+        Logger.info(`Added trader address ${normalizedAddress} by ${actor}`);
 
         res.json({
             success: true,
@@ -1005,10 +1404,18 @@ app.post('/api/config/user-addresses', authenticateToken, requireAdmin, (req: Au
 
 app.delete('/api/config/user-addresses/:address', authenticateToken, requireAdmin, (req: AuthRequest, res: Response) => {
     try {
-        const { address } = req.params;
-        const currentAddresses = ENV.USER_ADDRESSES || [];
+        const normalizedAddress = normalizeAddress(req.params.address);
+        if (!normalizedAddress) {
+            return res.status(400).json({
+                success: false,
+                error: 'Invalid Ethereum address format',
+                timestamp: Date.now()
+            } as ApiResponse);
+        }
 
-        const filteredAddresses = currentAddresses.filter(addr => addr.toLowerCase() !== address.toLowerCase());
+        const currentAddresses = getConfiguredUserAddresses();
+
+        const filteredAddresses = currentAddresses.filter((addr) => addr.toLowerCase() !== normalizedAddress);
 
         if (filteredAddresses.length === currentAddresses.length) {
             return res.status(404).json({
@@ -1018,13 +1425,15 @@ app.delete('/api/config/user-addresses/:address', authenticateToken, requireAdmi
             });
         }
 
+        const actor = getRequesterIdentity(req);
+
         // Persist the updated addresses
-        savePersistentConfig({ userAddresses: filteredAddresses }, req.user!.address || req.user!.moniqoId || 'unknown');
+        savePersistentConfig({ userAddresses: filteredAddresses }, actor);
 
         // Update runtime environment
         updateEnvironmentFromConfig();
 
-        Logger.info(`Removed trader address ${address} by ${req.user?.address}`);
+        Logger.info(`Removed trader address ${normalizedAddress} by ${actor}`);
 
         res.json({
             success: true,
@@ -1079,9 +1488,10 @@ app.get('/api/config/wallet', authenticateToken, (req: AuthRequest, res: Respons
 app.post('/api/config/wallet', authenticateToken, requireAdmin, (req: AuthRequest, res: Response) => {
     try {
         const { proxyWallet, privateKey } = req.body;
+        const normalizedProxyWallet = proxyWallet ? normalizeAddress(proxyWallet) : null;
 
         // Validate proxy wallet address
-        if (proxyWallet && !proxyWallet.match(/^0x[a-fA-F0-9]{40}$/)) {
+        if (proxyWallet && !normalizedProxyWallet) {
             return res.status(400).json({
                 success: false,
                 error: 'Invalid proxy wallet address format',
@@ -1100,21 +1510,24 @@ app.post('/api/config/wallet', authenticateToken, requireAdmin, (req: AuthReques
 
         // Persist wallet credentials
         const walletUpdates: Partial<PersistentConfig> = {};
-        if (proxyWallet) walletUpdates.proxyWallet = proxyWallet;
+        if (normalizedProxyWallet) walletUpdates.proxyWallet = normalizedProxyWallet;
         if (privateKey) walletUpdates.privateKey = privateKey;
 
-        savePersistentConfig(walletUpdates, req.user!.address || req.user!.moniqoId || 'unknown');
+        const actor = getRequesterIdentity(req);
+        savePersistentConfig(walletUpdates, actor);
 
         // Update runtime environment
         updateEnvironmentFromConfig();
 
-        Logger.info(`Wallet credentials updated by ${req.user?.address}`);
+        Logger.info(`Wallet credentials updated by ${actor}`);
 
         res.json({
             success: true,
             data: {
                 message: 'Wallet credentials updated successfully',
-                proxyWallet: proxyWallet ? `${proxyWallet.slice(0, 6)}...${proxyWallet.slice(-4)}` : null,
+                proxyWallet: normalizedProxyWallet
+                    ? `${normalizedProxyWallet.slice(0, 6)}...${normalizedProxyWallet.slice(-4)}`
+                    : null,
                 hasPrivateKey: !!privateKey
             },
             timestamp: Date.now()
@@ -1179,16 +1592,17 @@ app.post('/api/config/api-keys', authenticateToken, requireAdmin, (req: AuthRequ
         }
 
         // Persist API credentials
+        const actor = getRequesterIdentity(req);
         savePersistentConfig({
             clobApiKey: apiKey,
             clobSecret: secret,
             clobPassPhrase: passphrase
-        }, req.user!.address || req.user!.moniqoId || 'unknown');
+        }, actor);
 
         // Update runtime environment
         updateEnvironmentFromConfig();
 
-        Logger.info(`Polymarket API credentials updated by ${req.user?.address}`);
+        Logger.info(`Polymarket API credentials updated by ${actor}`);
 
         res.json({
             success: true,
@@ -1308,7 +1722,7 @@ app.get('/api/moniqo/user', authenticateToken, (req: AuthRequest, res: Response)
             walletAddress: config.proxyWallet,
             isConfigured: !!(config.proxyWallet && config.userAddresses?.length),
             tradingEnabled: config.enableTrading || false,
-            userAddresses: config.userAddresses || [],
+            userAddresses: getConfiguredUserAddresses(),
             lastUpdated: config.lastUpdated
         };
 
@@ -1336,6 +1750,7 @@ app.get('/api/moniqo/user', authenticateToken, (req: AuthRequest, res: Response)
 app.post('/api/config/setup', authenticateToken, requireAdmin, async (req: AuthRequest, res: Response) => {
     try {
         const setupData = req.body;
+        const normalizedProxyWallet = normalizeAddress(setupData.proxyWallet);
 
         // Validate all required fields
         const required = ['proxyWallet', 'privateKey', 'userAddresses', 'mongoUri', 'rpcUrl'];
@@ -1350,7 +1765,7 @@ app.post('/api/config/setup', authenticateToken, requireAdmin, async (req: AuthR
         }
 
         // Validate wallet address
-        if (!setupData.proxyWallet.match(/^0x[a-fA-F0-9]{40}$/)) {
+        if (!normalizedProxyWallet) {
             return res.status(400).json({
                 success: false,
                 error: 'Invalid proxy wallet address',
@@ -1367,21 +1782,24 @@ app.post('/api/config/setup', authenticateToken, requireAdmin, async (req: AuthR
             });
         }
 
+        const normalizedUserAddresses: string[] = [];
         for (const addr of setupData.userAddresses) {
-            if (!addr.match(/^0x[a-fA-F0-9]{40}$/)) {
+            const normalizedAddress = normalizeAddress(addr);
+            if (!normalizedAddress) {
                 return res.status(400).json({
                     success: false,
                     error: `Invalid trader address: ${addr}`,
                     timestamp: Date.now()
                 });
             }
+            normalizedUserAddresses.push(normalizedAddress);
         }
 
         // Prepare configuration for persistence
         const setupConfig: Partial<PersistentConfig> = {
-            proxyWallet: setupData.proxyWallet,
+            proxyWallet: normalizedProxyWallet,
             privateKey: setupData.privateKey,
-            userAddresses: setupData.userAddresses,
+            userAddresses: normalizedUserAddresses,
             mongoUri: setupData.mongoUri,
             rpcUrl: setupData.rpcUrl,
             clobHttpUrl: setupData.clobHttpUrl || 'https://clob.polymarket.com',
@@ -1402,12 +1820,13 @@ app.post('/api/config/setup', authenticateToken, requireAdmin, async (req: AuthR
         if (setupData.maxSlippageBps) setupConfig.maxSlippageBps = setupData.maxSlippageBps;
 
         // Persist complete setup
-        savePersistentConfig(setupConfig, req.user!.address || req.user!.moniqoId || 'unknown');
+        const actor = getRequesterIdentity(req);
+        savePersistentConfig(setupConfig, actor);
 
         // Update runtime environment
         updateEnvironmentFromConfig();
 
-        Logger.info(`Complete bot setup completed by ${req.user?.address}`);
+        Logger.info(`Complete bot setup completed by ${actor}`);
 
         res.json({
             success: true,

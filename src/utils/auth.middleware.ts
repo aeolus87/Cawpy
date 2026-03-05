@@ -2,6 +2,45 @@ import { Request, Response, NextFunction } from 'express';
 import * as jwt from 'jsonwebtoken';
 import { ENV } from '../config/env';
 
+const ETH_ADDRESS_REGEX = /^0x[a-fA-F0-9]{40}$/;
+
+const pickString = (...values: unknown[]): string | undefined => {
+    for (const value of values) {
+        if (typeof value === 'string' && value.trim().length > 0) {
+            return value.trim();
+        }
+    }
+    return undefined;
+};
+
+const normalizeAddress = (value: unknown): string | undefined => {
+    if (typeof value !== 'string') return undefined;
+    const candidate = value.trim();
+    if (!ETH_ADDRESS_REGEX.test(candidate)) return undefined;
+    return candidate.toLowerCase();
+};
+
+const resolveAddress = (decoded: any): string | undefined => {
+    return normalizeAddress(
+        pickString(
+            decoded?.address,
+            decoded?.walletAddress,
+            decoded?.userAddress,
+            decoded?.wallet,
+            decoded?.proxyWallet,
+            decoded?.subAddress
+        )
+    );
+};
+
+const resolveMoniqoId = (decoded: any): string | undefined => {
+    return pickString(decoded?.moniqoId, decoded?.userId, decoded?.sub, decoded?.uid);
+};
+
+const resolveRole = (decoded: any): 'admin' | 'user' => {
+    return decoded?.role === 'admin' ? 'admin' : 'user';
+};
+
 export interface AuthRequest extends Request {
     user?: {
         address?: string;      // Ethereum address (Polycopy native)
@@ -30,10 +69,10 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
 
         // Normalize user object for Polycopy format
         req.user = {
-            address: decoded.address,
-            moniqoId: decoded.moniqoId || decoded.userId,
+            address: resolveAddress(decoded),
+            moniqoId: resolveMoniqoId(decoded),
             email: decoded.email,
-            role: decoded.role || 'user',
+            role: resolveRole(decoded),
             permissions: decoded.permissions || []
         };
         next();
@@ -47,10 +86,10 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
             // Accept Moniqo tokens if they have required fields
             if (decoded && (decoded.moniqoId || decoded.userId || decoded.sub)) {
                 req.user = {
-                    moniqoId: decoded.moniqoId || decoded.userId || decoded.sub,
+                    moniqoId: resolveMoniqoId(decoded),
                     email: decoded.email,
-                    address: decoded.address, // May be provided by Moniqo
-                    role: decoded.role || 'user',
+                    address: resolveAddress(decoded),
+                    role: resolveRole(decoded),
                     permissions: decoded.permissions || []
                 };
                 next();

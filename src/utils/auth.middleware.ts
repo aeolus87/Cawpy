@@ -68,7 +68,8 @@ export function authenticateToken(req: AuthRequest, res: Response, next: NextFun
 }
 
 export function requireAdmin(req: AuthRequest, res: Response, next: NextFunction) {
-    if (req.user?.role !== 'admin') {
+    // Moniqo-integrated users are treated as privileged operators in this deployment.
+    if (req.user?.role !== 'admin' && !req.user?.moniqoId) {
         return res.status(403).json({
             success: false,
             error: 'Admin access required',

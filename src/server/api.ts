@@ -98,6 +98,11 @@ function savePersistentConfig(config: Partial<PersistentConfig>, updatedBy: stri
         const existingConfig = loadPersistentConfig();
 
         const fullConfig: PersistentConfig = {
+            // User identification
+            moniqoId: config.moniqoId || existingConfig.moniqoId,
+            email: config.email || existingConfig.email,
+            role: config.role || existingConfig.role || 'user',
+
             // User addresses
             userAddresses: config.userAddresses || existingConfig.userAddresses || [],
 
@@ -333,6 +338,7 @@ app.get('/health', (req: Request, res: Response) => {
 app.post('/api/auth/login', async (req: Request, res: Response) => {
     try {
         const { address, signature, moniqoToken, moniqoId, email } = req.body;
+        const persistedConfig = loadPersistentConfig();
 
         let userData: any = {};
         let token: string;
@@ -348,12 +354,33 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
         }
         // Method 2: Moniqo token exchange (for Moniqo-integrated users)
         else if (moniqoToken || moniqoId) {
+            const normalizedMoniqoId = typeof moniqoId === 'string' ? moniqoId.trim() : '';
+            const persistedMoniqoId =
+                typeof persistedConfig.moniqoId === 'string' ? persistedConfig.moniqoId.trim() : '';
+            const shouldBootstrapAdmin = !persistedMoniqoId && !persistedConfig.role;
+            const persistedAdminForCurrentUser =
+                persistedConfig.role === 'admin' &&
+                !!normalizedMoniqoId &&
+                normalizedMoniqoId === persistedMoniqoId;
+            const resolvedRole = shouldBootstrapAdmin || persistedAdminForCurrentUser ? 'admin' : 'user';
+
+            if (shouldBootstrapAdmin && normalizedMoniqoId) {
+                savePersistentConfig(
+                    {
+                        moniqoId: normalizedMoniqoId,
+                        email,
+                        role: 'admin'
+                    },
+                    `auth-bootstrap-${normalizedMoniqoId}`
+                );
+            }
+
             // Accept Moniqo authentication
             userData = {
                 moniqoId: moniqoId,
                 email: email,
                 address: address, // Optional wallet address from Moniqo
-                role: 'user' // Moniqo users start as regular users
+                role: resolvedRole
             };
         } else {
             return res.status(400).json({
@@ -1207,7 +1234,11 @@ app.post('/api/moniqo/user', authenticateToken, async (req: AuthRequest, res: Re
 
         // Check if user already exists
         const existingConfig = loadPersistentConfig();
-        const existingUsers = existingConfig.userAddresses || [];
+        const existingMoniqoId =
+            typeof existingConfig.moniqoId === 'string' ? existingConfig.moniqoId.trim() : '';
+        const isFirstUser = !existingMoniqoId;
+        const isExistingAdmin =
+            existingMoniqoId === moniqoId && existingConfig.role === 'admin';
 
         // Create user configuration
         const userConfig: Partial<PersistentConfig> = {
@@ -1225,9 +1256,8 @@ app.post('/api/moniqo/user', authenticateToken, async (req: AuthRequest, res: Re
             copyStrategy: 'proportional'
         };
 
-        // If this is the first user, set them as admin
-        const isFirstUser = !existingUsers.length;
-        if (isFirstUser) {
+        // The first linked user becomes admin and keeps that role on re-link.
+        if (isFirstUser || isExistingAdmin) {
             userConfig.role = 'admin';
         }
 
@@ -1241,7 +1271,7 @@ app.post('/api/moniqo/user', authenticateToken, async (req: AuthRequest, res: Re
             data: {
                 message: 'User account created/linked successfully',
                 userId: moniqoId,
-                isAdmin: isFirstUser,
+                isAdmin: userConfig.role === 'admin',
                 polycopyReady: true
             },
             timestamp: Date.now()
